@@ -26,3 +26,6 @@ npm-debug.log*
 # MLflow
 mlruns/
 uv.lock
+
+# Customer bundle build artifact
+langgraph-databricks-template.zip
