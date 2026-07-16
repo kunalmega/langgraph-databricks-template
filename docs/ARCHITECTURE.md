@@ -20,6 +20,24 @@ Unity Catalog — so *every* agent you build is governed and cost-attributed **i
 > Editable diagram sources are in [`docs/diagrams/`](diagrams/) — `.drawio` (open in
 > [draw.io](https://app.diagrams.net) / Lucidchart) and `.mmd` (Mermaid).
 
+### Two ways in, one governed path out
+
+![Unity AI Gateway flow — two call paths, governed routing to any model, Lakebase telemetry](diagrams/unity_ai_gateway_flow.png)
+
+The end user reaches the agent **two ways**: directly via the **FastAPI** app, or via the
+**registered Agent endpoint**. Either way, the app's **custom agent code** (LangGraph /
+CrewAI / SDK) makes its LLM call through **Unity AI Gateway**, which handles it all in one
+layer:
+
+- **Agent endpoint** — registers your app for governed, first-class access.
+- **Governance** — policies, PII handling, lineage.
+- **Cost attribution** — per team and per app.
+- **Model routing** — swap models or fall back across providers (**Claude, OpenAI,
+  Llama/DBRX, Mistral/OSS**) with no code change.
+
+All logs, audit records, and telemetry land in **Lakebase (Postgres)** — the same store
+that holds conversation memory — so traces and cost are queryable like any other data asset.
+
 ---
 
 ## The 10,000-ft view (component flow)
