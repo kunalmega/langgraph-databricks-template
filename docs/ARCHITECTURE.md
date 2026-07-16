@@ -8,15 +8,55 @@ what each file does and how a message flows through the system.
 
 ## The 10,000-ft view
 
+Every LLM call goes through **Unity AI Gateway** (🛡️). Every conversation is saved in
+**Lakebase Postgres** (💾). Every agent is inventoried and cost-attributed in one place in
+**Unity Catalog** (📇).
+
+```mermaid
+flowchart LR
+    user([User / client]):::ext
+
+    subgraph APP["🚀 Databricks App &nbsp;(runs as its own Service Principal)"]
+        api["app.py<br/>FastAPI web server"]:::code
+        route["routes/chat.py<br/>POST /api/chat"]:::code
+        agentnode["graph.py<br/>LangGraph ReAct agent<br/>(tools + prompt)"]:::agent
+        db["db.py<br/>Lakebase pool<br/>(OAuth token per conn)"]:::code
+    end
+
+    subgraph GW["🛡️ Unity AI Gateway &nbsp;(governance for ALL LLM traffic)"]
+        gwep["Gateway endpoint<br/>UAIG_ENDPOINT"]:::gw
+        guard["Guardrails · Rate limits<br/>Usage tracking · Cost attribution"]:::gw
+    end
+
+    model["Foundation model<br/>(Claude / GPT / Gemini …)"]:::model
+    lake[("💾 Lakebase<br/>Postgres<br/>checkpoints = memory")]:::store
+
+    user -->|"HTTP + Bearer token"| api
+    api --> route
+    route --> agentnode
+    agentnode -->|"ChatDatabricks(use_ai_gateway=True)"| gwep
+    gwep --> guard --> model
+    route -->|"save / load state<br/>by thread_id"| db
+    db -->|"PostgresSaver"| lake
+
+    classDef ext fill:#e8eaf6,stroke:#5c6bc0,color:#1a237e;
+    classDef code fill:#e3f2fd,stroke:#1976d2,color:#0d47a1;
+    classDef agent fill:#fff3e0,stroke:#fb8c00,color:#e65100;
+    classDef gw fill:#fce4ec,stroke:#e91e63,color:#880e4f;
+    classDef model fill:#f3e5f5,stroke:#8e24aa,color:#4a148c;
+    classDef store fill:#e8f5e9,stroke:#43a047,color:#1b5e20;
 ```
-        ┌─────────────────────── Databricks App (a container) ───────────────────────┐
+
+<details><summary>Plain-text version of the same diagram (no Mermaid renderer needed)</summary>
+
+```
+        ┌─────────────────────── Databricks App (its own Service Principal) ─────────┐
  user   │  app.py (FastAPI)                                                           │
- ──────►│    POST /api/chat  ─►  server/routes/chat.py  ─►  server/graph.py (the agent)│
- HTTP   │                              │                          │                    │
-        │                              │                          ├─► LLM via Unity AI │──► Gateway ──► model
-        │                              ▼                          │   Gateway          │
-        │                       server/db.py  ──────────────────► Lakebase (Postgres)  │
-        │                       (Lakebase pool)   checkpoints     save/load memory      │
+ ──────►│    POST /api/chat  ─►  routes/chat.py  ─►  graph.py (the agent)             │
+ HTTP   │                              │                    │                          │
+        │                              │                    └─► ChatDatabricks ────────┼─► 🛡️ Unity AI Gateway ─► model
+        │                              ▼                        (use_ai_gateway=True)   │   (guardrails, limits,
+        │                       db.py (pool) ──PostgresSaver──► 💾 Lakebase (Postgres)  │    usage, cost)
         └────────────────────────────────────────────────────────────────────────────┘
 
 Same agent (server/graph.py) is ALSO packaged by agent.py + deploy_agent.py and
@@ -54,6 +94,36 @@ Trace it in `server/routes/chat.py`:
 
 Send the same `thread_id` again → it remembers. That memory lives in **Lakebase**, not in
 the app's RAM, so it survives restarts and works across replicas.
+
+**The full round-trip — one message, showing the Lakebase load/save and the gateway hop:**
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant A as app.py / chat.py
+    participant DB as Lakebase (Postgres)
+    participant G as LangGraph agent
+    participant GW as 🛡️ Unity AI Gateway
+    participant M as Model
+
+    U->>A: POST /api/chat {message, thread_id}
+    A->>DB: open pooled conn (mint OAuth token)
+    A->>DB: PostgresSaver: LOAD prior turns for thread_id
+    DB-->>A: conversation history
+    A->>G: graph.invoke(history + new message)
+    G->>GW: ChatDatabricks(use_ai_gateway=True)
+    Note over GW: guardrails · rate limit · usage + cost logged
+    GW->>M: forward request
+    M-->>GW: completion
+    GW-->>G: reply (governed)
+    G-->>A: assistant message
+    A->>DB: PostgresSaver: SAVE new turn (checkpoint)
+    A-->>U: {reply, thread_id}
+```
+
+Notice: **the LLM hop always goes through the gateway** (steps 6–10), and **state is read
+before and written after** the agent runs (steps 3, 12) — that's the durable Lakebase memory.
 
 ## 3. What is `server/graph.py`? (THE agent — this is the core)
 
@@ -121,6 +191,60 @@ This makes your agent a first-class, versioned entity on the Gateway **Agents** 
 
 So: **routing governs the LLM; `deploy_agent.py` registers the agent.** Both are "AI
 Gateway," but they're different layers — the doc `USAGE.md` shows how to *call* each.
+
+## 7. One place for everything: governance, cost, and the agent inventory
+
+This is the payoff of doing it the Databricks way. **However many custom apps/agents you
+build, they all route through one Unity AI Gateway and are inventoried + cost-attributed in
+one Unity Catalog.** No shadow AI, no per-team guesswork.
+
+```mermaid
+flowchart TB
+    subgraph AGENTS["Your custom apps / agents (any number)"]
+        a1["this template<br/>langgraph-sample"]:::agent
+        a2["another app<br/>support-bot"]:::agent
+        a3["another agent<br/>sales-assistant"]:::agent
+    end
+
+    subgraph GW["🛡️ Unity AI Gateway — the single control plane"]
+        direction TB
+        r["Routing (every LLM call)"]:::gw
+        g["Guardrails · Rate limits"]:::gw
+        u["Usage + token metering"]:::gw
+    end
+
+    subgraph UC["📇 Unity Catalog — one place to see & govern"]
+        inv["Agents inventory<br/>(registered agents, versions)"]:::uc
+        cost["Cost attribution per agent<br/>system.ai_gateway.usage"]:::uc
+        perm["Permissions & lineage<br/>(who can query what)"]:::uc
+    end
+
+    lake[("💾 Lakebase<br/>per-agent state / memory")]:::store
+
+    a1 --> r
+    a2 --> r
+    a3 --> r
+    r --> g --> u
+    u -->|"logs usage & cost"| cost
+    a1 -.->|"deploy_agent.py registers"| inv
+    a2 -.-> inv
+    a3 -.-> inv
+    inv --- perm
+    a1 -->|"checkpoints"| lake
+
+    classDef agent fill:#fff3e0,stroke:#fb8c00,color:#e65100;
+    classDef gw fill:#fce4ec,stroke:#e91e63,color:#880e4f;
+    classDef uc fill:#e3f2fd,stroke:#1976d2,color:#0d47a1;
+    classDef store fill:#e8f5e9,stroke:#43a047,color:#1b5e20;
+```
+
+- **All LLM traffic** from every agent flows through the gateway → uniform guardrails +
+  rate limits, and every call's tokens/cost land in **`system.ai_gateway.usage`** (query it
+  or use the Gateway UI). That's how you **attribute cost per agent in one place**.
+- **Registered agents** (via `deploy_agent.py`) appear together on the **Agents inventory**
+  in Unity Catalog — versioned, permissioned, with lineage to the model + tools they use.
+- **Lakebase** holds each agent's conversation state; because it's Postgres, that state is
+  also queryable/loggable like any other data asset.
 
 ---
 
