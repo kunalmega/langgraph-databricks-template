@@ -1,206 +1,249 @@
-# LangGraph Agent → Databricks App + Lakebase + Unity AI Gateway
+# LangGraph Agent on Databricks — App + Lakebase + Unity AI Gateway
 
-A **template** for a simple LangChain + LangGraph agent that:
+A **reusable template** for a simple LangChain + LangGraph agent, deployed the Databricks way:
 
-1. Runs as a **Databricks App** (FastAPI backend + minimal web UI).
-2. **Persists conversation state in Lakebase** (Postgres) via LangGraph's `PostgresSaver` — durable memory across turns and restarts.
-3. Routes all LLM calls through **Unity AI Gateway** (governance: rate limits, usage tracking, guardrails).
-4. Can be **logged/registered as a governed agent in Unity AI Gateway** (UC model → serving endpoint) so it appears on the **Agents** inventory alongside your other agents.
+- 🧠 **LangGraph ReAct agent** with a tool — the whole agent is one small file (`server/graph.py`).
+- 🌐 **Runs as a Databricks App** — FastAPI backend + a no-build web UI.
+- 💾 **Remembers conversations in Lakebase** (Postgres) via LangGraph's `PostgresSaver` — memory survives restarts.
+- 🛡️ **All LLM calls routed through Unity AI Gateway** — rate limits, usage tracking, guardrails.
+- 📇 **Registerable as a governed agent** on the Unity AI Gateway **Agents** inventory (`deploy_agent.py`).
 
-The same LangGraph graph (`server/graph.py`) is reused everywhere, so there's one place to change agent behavior.
+One agent definition (`server/graph.py`) is reused everywhere — change it once, everything updates.
 
-> **New here / handed this repo? Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) first.**
-> It explains in plain language how a message flows through `app.py`, what `agent.py`
-> does, which model is used and **how to swap the LLM (one line)**, and the difference
-> between routing the LLM through the gateway vs registering the agent on the Gateway
-> Agents page — with the exact file+line to look at for each.
-
-> **Consuming the agent from outside Databricks?** See **[USAGE.md](USAGE.md)** — it
-> shows both ways: (1) call the FastAPI app directly (stateful, Lakebase memory) and
-> (2) call the registered agent serving endpoint (governed, on the AI Gateway Agents
-> inventory), with verified curl / Python examples.
->
-> **Want to just test that both ways work?** Run `test_both_ways.py` — exact
-> step-by-step instructions are in **[RUN_TEST.md](RUN_TEST.md)** (assumes no prior setup).
+> ### 👉 New here? Read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) first.
+> It explains, in plain language and with exact file+line references: how a message flows
+> through `app.py`, what `agent.py` is, **which model is used and how to swap it (one line)**,
+> and the difference between routing the LLM through the gateway vs. registering the agent.
 
 ---
 
-## What you edit to reuse this template
+## Table of contents
 
-**Just one file for config:** copy `.env.example` → `.env` and fill it in. Every
-workspace-specific value lives there. To change *what the agent does*, edit
-`server/graph.py` (the tool + prompt). Nothing else needs touching.
-
-```
-.env.example        <- copy to .env, fill in  (THE config file — includes LLM choice)
-server/graph.py     <- the agent: LLM + tools + prompt  (edit behavior here)
-server/db.py        <- Lakebase pool            (rarely changes)
-server/config.py    <- auth + which model       (rarely changes)
-server/routes/chat.py  <- POST /api/chat        (rarely changes)
-app.py              <- FastAPI web server       (rarely changes)
-agent.py            <- MLflow ChatAgent wrapper (for gateway registration)
-deploy_agent.py     <- LOG AGENT INTO AI GATEWAY  (see Part C)
-app.yaml            <- Databricks App config (env for the deployed app)
-static/index.html   <- no-build chat UI (works without npm)
-setup/01_provision_lakebase.sh  <- CREATES Lakebase (project + database)
-setup/02_grant_app_sp.sh        <- grants the app SP all access it needs
-setup/03_deploy_app.sh          <- creates + syncs + deploys the app
-docs/ARCHITECTURE.md            <- how it all works, in plain language
-```
-
-**To swap the LLM:** change the single value `UAIG_ENDPOINT` in `.env` (local) or
-`app.yaml` (deployed). No code change. See [docs/ARCHITECTURE.md §4](docs/ARCHITECTURE.md).
+1. [How it fits together](#1-how-it-fits-together)
+2. [What you edit to reuse it](#2-what-you-edit-to-reuse-it)
+3. [Prerequisites](#3-prerequisites-one-time)
+4. [Build & deploy — the 5 steps](#4-build--deploy--the-5-steps)
+5. [Swapping the LLM](#5-swapping-the-llm)
+6. [Using the agent (two ways)](#6-using-the-agent-two-ways)
+7. [File map](#7-file-map)
+8. [Troubleshooting](#8-troubleshooting)
 
 ---
 
-## Prerequisites (one-time)
+## 1. How it fits together
 
-- A **serverless FEVM/Databricks workspace** (needed for Apps + Lakebase).
-- Databricks CLI **v0.285.0+** (`brew upgrade databricks`).
-- `uv` (Python package manager).
-- Log in: `databricks auth login --profile <your-profile>`
+```
+                 ┌──────────────── Databricks App (a container) ────────────────┐
+  user  ──HTTP──►│  app.py (FastAPI)  ──►  routes/chat.py  ──►  graph.py (agent) │
+                 │                              │                    │            │
+                 │                              │                    └─► LLM ─────┼─► Unity AI Gateway ─► model
+                 │                              ▼                                 │
+                 │                        db.py (pool)  ──►  Lakebase (Postgres)  │  save/load memory
+                 └──────────────────────────────────────────────────────────────┘
 
-> **Package access note:** if public PyPI is blocked on your machine, install via
-> the Databricks proxy: prefix any `uv` command with
-> `UV_INDEX_URL="https://pypi-proxy.cloud.databricks.com/simple"`.
-> This template ships a no-build `static/` UI so **npm is not required**.
+  Same agent (graph.py) is ALSO packaged by agent.py + deploy_agent.py and registered
+  as a governed agent on the Unity AI Gateway "Agents" page (a Model Serving endpoint).
+```
+
+---
+
+## 2. What you edit to reuse it
+
+| To change… | Edit… |
+|---|---|
+| **All config** (workspace, LLM, Lakebase names) | `.env` (copied from `.env.example`) — the one file |
+| **What the agent does** (tool + prompt) | `server/graph.py` |
+| **Which LLM** | one value: `UAIG_ENDPOINT` (see [§5](#5-swapping-the-llm)) |
+
+Everything else rarely changes. See the [file map](#7-file-map) for the rest.
+
+---
+
+## 3. Prerequisites (one-time)
+
+- A **serverless Databricks workspace** (needed for Apps + Lakebase — e.g. an FEVM workspace).
+- **Databricks CLI v0.285.0+** — `brew upgrade databricks`
+- **uv** (Python package manager) — `curl -LsSf https://astral.sh/uv/install.sh | sh`
+- **Log in:** `databricks auth login --host <workspace-url> --profile <profile-name>`
+- Verify: `databricks current-user me -p <profile>` prints your email.
 
 ```bash
-cp .env.example .env          # then edit .env
-set -a; source .env; set +a   # load it into your shell
+cp .env.example .env                 # then edit .env with your values
+set -a; source .env; set +a          # load .env into your shell (do this before each part)
 UV_INDEX_URL="https://pypi-proxy.cloud.databricks.com/simple" uv sync
 ```
 
+> **Blocked PyPI / npm?** On locked-down laptops public PyPI is blocked — always install
+> through the Databricks proxy (`UV_INDEX_URL=...` above). The app ships a no-build
+> `static/` UI, so **npm is never required**.
+
 ---
 
-## Part A — Provision Lakebase (the state store) — **one script**
+## 4. Build & deploy — the 5 steps
 
-This is the code that **creates** Lakebase. It creates the project + database and prints
-the two values you paste back into `.env`:
+Run them in order. Everything is parameterised from `.env`; `set -a; source .env; set +a`
+before each step.
+
+### Step 1 — Create Lakebase (the memory store)
 
 ```bash
-set -a; source .env; set +a
 bash setup/01_provision_lakebase.sh
-# -> prints PGHOST and ENDPOINT_NAME. Paste both into .env, then re-source it:
-set -a; source .env; set +a
 ```
+Creates the Lakebase project + database and **prints `PGHOST` and `ENDPOINT_NAME`** →
+paste both into `.env`, then re-source it (`set -a; source .env; set +a`). Idempotent
+(safe to re-run). *This is the code that creates Lakebase — no manual CLI needed.*
 
-(The script is idempotent — safe to re-run; it skips anything that already exists. It
-wraps the `databricks postgres create-project` / `create database` CLI calls so you don't
-run them by hand.)
-
-**How the state gets "locked" in Lakebase:** `server/db.py` opens a psycopg pool whose
-`OAuthConnection` mints a fresh Lakebase token per connection (via
-`generate_database_credential`, recycled every 45 min before the 1-hour expiry).
-`server/routes/chat.py` wraps the graph with LangGraph's `PostgresSaver`, so every turn's
-checkpoint is written to Postgres keyed by `thread_id`. Same `thread_id` → memory persists.
-
----
-
-## Part B — Run & test locally
+### Step 2 — Run & test locally
 
 ```bash
-set -a; source .env; set +a
 uv run uvicorn app:app --reload --port 8000
-curl -sX POST localhost:8000/api/setup        # create checkpoint tables (once)
+curl -sX POST localhost:8000/api/setup     # once: creates the checkpoint tables
 
-# Two turns, same thread → proves Lakebase memory
+# Two turns on the same thread → proves memory persists in Lakebase
 TID=$(curl -sX POST localhost:8000/api/chat -H 'Content-Type: application/json' \
   -d '{"message":"What is 23 * 19? Use the calculator tool."}' | tee /dev/stderr | jq -r .thread_id)
 curl -sX POST localhost:8000/api/chat -H 'Content-Type: application/json' \
   -d "{\"message\":\"What did I just ask?\",\"thread_id\":\"$TID\"}"
 ```
+The second turn should recall the first. Memory lives in Lakebase (`PostgresSaver`),
+keyed by `thread_id` — not in the app's RAM.
 
-Verify checkpoints landed: `psql ... -c "SELECT count(*) FROM checkpoints;"`
+### Step 3 — Deploy the app + grant its service principal
 
----
-
-## Part C — Log the agent into Unity AI Gateway ⭐ (the important part)
-
-This is what makes the agent a **governed, versioned asset on the Unity AI Gateway
-Agents inventory**. `deploy_agent.py` does it in three steps:
-
-1. **Log** the MLflow `ChatAgent` (wraps the same graph) with `code_paths=["server/"]`
-   so the graph is packaged, and `resources=[DatabricksServingEndpoint(...)]` so the
-   gateway endpoint it depends on is declared.
-2. **Register** it to Unity Catalog as a model (`<catalog>.<schema>.langgraph_sample_agent`),
-   with retry-on-transient-UC-error.
-3. **Deploy** it with `databricks.agents.deploy()` → a Model Serving endpoint.
-   **After this, the agent appears in the Unity AI Gateway → Agents tab automatically.**
-   Governance (rate limits, guardrails, usage tracking) is then configured in the
-   Unity AI Gateway UI. *(Note: the old `put_ai_gateway` API is not used for agent endpoints.)*
+A Databricks App runs as its **own service principal (SP)**, created when the app is
+created. So it's a 3-part dance (create → grant → redeploy):
 
 ```bash
-set -a; source .env; set +a
-export DATABRICKS_CONFIG_PROFILE="$DATABRICKS_PROFILE"   # disambiguates MLflow auth if multiple profiles match your host
-
-# create the UC schema once
-databricks schemas create "$UC_SCHEMA" "$UC_CATALOG" -p "$DATABRICKS_PROFILE"
-
-# log → register → deploy  (reads UC_CATALOG / UC_SCHEMA from .env)
-uv run python deploy_agent.py
-```
-
-Confirm it's registered and on the Agents inventory:
-
-```bash
-databricks model-versions list "$UC_CATALOG.$UC_SCHEMA.langgraph_sample_agent" -p "$DATABRICKS_PROFILE" -o json | jq -r '.[] | "v\(.version) \(.status)"'
-```
-Then open **Serving → Unity AI Gateway → Agents** in the UI — your agent is listed there.
-
-> **If registration times out:** it's re-runnable and won't re-log. The model is logged
-> once to an MLflow experiment; to skip re-logging on a retry pass its id via
-> `register_from_run.py --model-id <m-...>`. UC write timeouts (`UC-TKTLK`) are transient
-> platform issues — just re-run.
-
----
-
-## Part D — Deploy the app to Databricks Apps — **scripts**
-
-Deploying involves three ordered steps (the app SP must exist before you can grant it):
-
-```bash
-set -a; source .env; set +a
-
-# 1. Create the app + sync + bind gateway resource. Prints the app SP client id.
+# 3a. Create the app, sync code, bind the gateway resource. Prints the app SP client id.
 bash setup/03_deploy_app.sh
-#    -> copy the printed "APP SP client id"
+#     -> copy the printed "APP SP client id"
 
-# 2. Grant that SP everything it needs (Postgres role + table grants + gateway CAN_QUERY)
-APP_SP_CLIENT_ID=<paste-from-step-1> bash setup/02_grant_app_sp.sh
+# 3b. Grant that SP everything it needs:
+#     - a Postgres role on Lakebase (to mint DB tokens)
+#     - table/schema GRANTs in the app DB (to read/write checkpoints)
+#     - CAN_QUERY on the gateway endpoint (so its LLM calls are allowed)
+APP_SP_CLIENT_ID=<paste-from-3a> bash setup/02_grant_app_sp.sh
 
-# 3. Set PGUSER=<app SP client id> in app.yaml, then re-run the deploy to pick it up
+# 3c. Put PGUSER=<that SP client id> in app.yaml, then redeploy to pick it up
 bash setup/03_deploy_app.sh
 ```
+`setup/02_grant_app_sp.sh` is the code that **gives the app SP all its access** — skipping
+it is what causes `invalid_client` (Lakebase) or `403` (gateway). Logs: append `/logz` to
+the app URL (`databricks apps get <app> -p <profile> | jq -r .url`).
 
-`setup/02_grant_app_sp.sh` is the code that **provides all access to the app's service
-principal** — the Postgres role, the table/schema grants, and gateway `CAN_QUERY` — the
-things that otherwise fail with `invalid_client` / 403. Logs: append `/logz` to the app URL.
+### Step 4 — Register the agent into Unity AI Gateway ⭐
+
+This makes the agent a **governed, versioned entity on the Gateway → Agents page**.
+
+```bash
+export DATABRICKS_CONFIG_PROFILE="$DATABRICKS_PROFILE"   # disambiguates MLflow auth
+databricks schemas create "$UC_SCHEMA" "$UC_CATALOG" -p "$DATABRICKS_PROFILE"   # once
+uv run python deploy_agent.py                            # reads UC_CATALOG / UC_SCHEMA / UAIG_ENDPOINT from .env
+```
+`deploy_agent.py` does three things (see its docstring): **log** the MLflow ChatAgent
+(packaging `server/`, declaring the LLM endpoint as a dependency), **register** it to
+Unity Catalog, and **deploy** it with `databricks.agents.deploy()`. After it finishes the
+agent shows up under **Serving → Unity AI Gateway → Agents**.
+
+Confirm:
+```bash
+databricks model-versions list "$UC_CATALOG.$UC_SCHEMA.langgraph_sample_agent" \
+  -p "$DATABRICKS_PROFILE" -o json | jq -r '.[] | "v\(.version) \(.status)"'
+```
+> If UC registration times out (transient `UC-TKTLK`), just re-run. It won't re-log — to
+> skip re-logging pass the logged-model id: `python register_from_run.py --model-id <m-...>`.
+
+### Step 5 — Verify both ways work
+
+```bash
+export DATABRICKS_PROFILE   # already set
+.venv/bin/python test_both_ways.py    # tests the app AND the agent endpoint
+```
+See [`RUN_TEST.md`](RUN_TEST.md) for exact, no-assumptions run instructions (incl. a
+service-principal / token-only variant, `test_api_sp.py`).
 
 ---
 
-## Two ways to govern with Unity AI Gateway (pick per agent)
+## 5. Swapping the LLM
 
-| | **App routes through gateway** (Part D) | **Register as UC agent** (Part C) |
-|---|---|---|
-| LLM calls governed | ✅ | ✅ |
-| Cost | app compute only | + scale-to-zero serving endpoint |
-| Shows on **Agents inventory** | as a caller (request-tagged) | ✅ as a first-class versioned agent |
-| Use when | low-ops internal app | needs versioning/rollback + central inventory |
+The model is **one value** — the Unity AI Gateway endpoint name, `UAIG_ENDPOINT`.
 
-You do **not** need the serving endpoint just to get governance — routing via
-`ChatDatabricks(use_ai_gateway=True)` is enough. Register as a UC agent (Part C) when you
-want it on the managed Agents inventory with lifecycle + rollback.
-
----
-
-## Troubleshooting
-
-| Symptom | Fix |
+| Where | How |
 |---|---|
-| `Error installing packages` on deploy | Don't ship `uv.lock`; ship `requirements.txt` with pinned versions. |
+| Local run | edit `UAIG_ENDPOINT` in `.env` |
+| Deployed app | edit `UAIG_ENDPOINT` in `app.yaml`, redeploy |
+
+No code change. `server/graph.py` reads it and passes it to
+`ChatDatabricks(model=..., use_ai_gateway=True)`, so every call is gateway-governed.
+
+List what your workspace offers:
+```bash
+databricks serving-endpoints list -p <profile> -o json | jq -r '.[].name'
+```
+Examples: `databricks-claude-sonnet-5`, `databricks-claude-opus-4-8`, `databricks-gpt-5-5`,
+`databricks-gemini-3-5-flash`. (Details in [`docs/ARCHITECTURE.md §4`](docs/ARCHITECTURE.md).)
+
+---
+
+## 6. Using the agent (two ways)
+
+Full, verified curl/Python examples are in [`USAGE.md`](USAGE.md). In short:
+
+| | **Way 1 — the App** | **Way 2 — the Agent endpoint** |
+|---|---|---|
+| URL | `<app-url>/api/chat` | `<host>/serving-endpoints/<agent-endpoint>/invocations` |
+| Memory | ✅ Lakebase, per `thread_id` | ❌ stateless (you send history) |
+| On the Gateway **Agents** page | as a caller (request-tagged) | ✅ first-class versioned agent |
+| Cost | app compute | + scale-to-zero serving endpoint |
+| Best for | interactive chat with memory | programmatic / governed consumption |
+
+Both are just **token + URL** — no venv needed to *call* them. You don't need the serving
+endpoint (Way 2 / Step 4) just for governance — routing (Step 3) already governs the LLM.
+Register the agent (Step 4) when you want it inventoried, versioned, and independently callable.
+
+---
+
+## 7. File map
+
+| File | What it is |
+|---|---|
+| `.env.example` | Copy to `.env` — the one config file (incl. the LLM choice). |
+| `server/graph.py` | **The agent**: LLM + tools + ReAct graph. Edit behavior here. |
+| `server/config.py` | Auth + which model (`get_serving_endpoint`). |
+| `server/db.py` | Lakebase connection pool (mints DB tokens per connection). |
+| `server/routes/chat.py` | `POST /api/chat` — runs the agent with Lakebase memory. |
+| `app.py` | FastAPI web server; opens the pool, serves API + UI. |
+| `agent.py` | Same agent wrapped as an MLflow ChatAgent (for the endpoint). |
+| `deploy_agent.py` | Log → register → deploy the agent onto the Gateway Agents page. |
+| `register_from_run.py` | Retry helper: register an already-logged model (skips re-log). |
+| `app.yaml` | Deployed-app config: env vars the app sees (incl. `UAIG_ENDPOINT`). |
+| `static/index.html` | No-build chat UI (so npm isn't required). |
+| `setup/01_provision_lakebase.sh` | **Creates Lakebase** (project + database). |
+| `setup/02_grant_app_sp.sh` | Grants the app SP all access (Postgres role, grants, gateway CAN_QUERY). |
+| `setup/03_deploy_app.sh` | Create + sync + deploy the app. |
+| `test_both_ways.py` / `test_api_sp.py` | Test both consumption paths (SDK auth / SP token-only). |
+| `docs/ARCHITECTURE.md` | How it all works, in plain language. |
+| `USAGE.md` / `RUN_TEST.md` | How to call the agent / how to run the tests. |
+
+---
+
+## 8. Troubleshooting
+
+| Symptom | Cause & fix |
+|---|---|
+| `Connection refused ... pypi.org` | Public PyPI blocked → use `UV_INDEX_URL="https://pypi-proxy.cloud.databricks.com/simple"`. |
+| `Error installing packages` on deploy | Don't ship `uv.lock` (proxy wheel URLs rotate); ship `requirements.txt` with pinned versions. |
 | App 502 / `ImportError: ExecutionInfo` | LangGraph version skew — keep the pinned set in `requirements.txt`. |
-| `cannot get token: multiple profiles match host` | Set `DATABRICKS_CONFIG_PROFILE`; MLflow URIs pinned to `databricks://<profile>`. |
-| `CREATE INDEX CONCURRENTLY cannot run inside a transaction` | `/api/setup` opens the conn with `autocommit=True` (already handled). |
-| Model registration times out (`UC-TKTLK`) | Transient UC issue — re-run `deploy_agent.py` (or `register_from_run.py --model-id`). |
-| `temperature not supported` | Reasoning models (claude-sonnet-5) reject it — `build_llm()` omits it. |
+| App 500 + `invalid_client` in `/logz` | App SP lost its access/credential → re-run `setup/02_grant_app_sp.sh`; if the SP secret was wiped, delete+recreate the app. |
+| `403 Forbidden` calling the app | Caller lacks **CAN_USE** on the app. |
+| `403 Forbidden` calling the agent endpoint | Caller lacks **CAN_QUERY** on the serving endpoint. |
+| `cannot get token: multiple profiles match host` | `export DATABRICKS_CONFIG_PROFILE=<profile>` (MLflow auth disambiguation). |
+| `CREATE INDEX CONCURRENTLY cannot run inside a transaction` | Handled — `/api/setup` uses `autocommit=True`. |
+| Model registration times out (`UC-TKTLK`) | Transient UC issue — re-run `deploy_agent.py` / `register_from_run.py --model-id`. |
+| `temperature not supported` | Reasoning models (e.g. claude-sonnet-5) reject it — `build_llm()` omits it. |
+
+---
+
+*Template scaffolded for a Databricks serverless workspace. Contains workspace
+identifiers (host, app URL, SP client id) — not secrets. Keep real `.env` files and OAuth
+secrets out of git (`.env` is gitignored).*
