@@ -9,6 +9,12 @@ A **template** for a simple LangChain + LangGraph agent that:
 
 The same LangGraph graph (`server/graph.py`) is reused everywhere, so there's one place to change agent behavior.
 
+> **New here / handed this repo? Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) first.**
+> It explains in plain language how a message flows through `app.py`, what `agent.py`
+> does, which model is used and **how to swap the LLM (one line)**, and the difference
+> between routing the LLM through the gateway vs registering the agent on the Gateway
+> Agents page — with the exact file+line to look at for each.
+
 > **Consuming the agent from outside Databricks?** See **[USAGE.md](USAGE.md)** — it
 > shows both ways: (1) call the FastAPI app directly (stateful, Lakebase memory) and
 > (2) call the registered agent serving endpoint (governed, on the AI Gateway Agents
@@ -26,17 +32,24 @@ workspace-specific value lives there. To change *what the agent does*, edit
 `server/graph.py` (the tool + prompt). Nothing else needs touching.
 
 ```
-.env.example        <- copy to .env, fill in  (THE config file)
+.env.example        <- copy to .env, fill in  (THE config file — includes LLM choice)
 server/graph.py     <- the agent: LLM + tools + prompt  (edit behavior here)
 server/db.py        <- Lakebase pool            (rarely changes)
-server/config.py    <- auth + env resolution    (rarely changes)
+server/config.py    <- auth + which model       (rarely changes)
 server/routes/chat.py  <- POST /api/chat        (rarely changes)
-app.py              <- FastAPI entry            (rarely changes)
+app.py              <- FastAPI web server       (rarely changes)
 agent.py            <- MLflow ChatAgent wrapper (for gateway registration)
 deploy_agent.py     <- LOG AGENT INTO AI GATEWAY  (see Part C)
 app.yaml            <- Databricks App config (env for the deployed app)
 static/index.html   <- no-build chat UI (works without npm)
+setup/01_provision_lakebase.sh  <- CREATES Lakebase (project + database)
+setup/02_grant_app_sp.sh        <- grants the app SP all access it needs
+setup/03_deploy_app.sh          <- creates + syncs + deploys the app
+docs/ARCHITECTURE.md            <- how it all works, in plain language
 ```
+
+**To swap the LLM:** change the single value `UAIG_ENDPOINT` in `.env` (local) or
+`app.yaml` (deployed). No code change. See [docs/ARCHITECTURE.md §4](docs/ARCHITECTURE.md).
 
 ---
 
@@ -60,24 +73,21 @@ UV_INDEX_URL="https://pypi-proxy.cloud.databricks.com/simple" uv sync
 
 ---
 
-## Part A — Provision Lakebase (the state store)
+## Part A — Provision Lakebase (the state store) — **one script**
+
+This is the code that **creates** Lakebase. It creates the project + database and prints
+the two values you paste back into `.env`:
 
 ```bash
-# 1. Create the Lakebase Autoscaling project (auto-creates production branch + primary endpoint)
-databricks postgres create-project langgraph-sample \
-  --json '{"spec": {"display_name": "LangGraph Sample"}}' --no-wait -p "$DATABRICKS_PROFILE"
-
-# 2. Wait until READY / ACTIVE
-databricks postgres list-branches  projects/langgraph-sample                    -p "$DATABRICKS_PROFILE" -o json | jq '.[].status.current_state'
-databricks postgres list-endpoints projects/langgraph-sample/branches/production -p "$DATABRICKS_PROFILE" -o json | jq '.[].status.current_state'
-
-# 3. Grab the host → put it in .env as PGHOST
-databricks postgres list-endpoints projects/langgraph-sample/branches/production -p "$DATABRICKS_PROFILE" -o json | jq -r '.[0].status.hosts.host'
-
-# 4. Create the app database (token = short-lived OAuth credential)
-TOKEN=$(databricks postgres generate-database-credential projects/langgraph-sample/branches/production/endpoints/primary -p "$DATABRICKS_PROFILE" -o json | jq -r '.token')
-PGPASSWORD=$TOKEN psql "host=$PGHOST port=5432 dbname=databricks_postgres user=$PGUSER sslmode=require" -c "CREATE DATABASE langgraph_app;"
+set -a; source .env; set +a
+bash setup/01_provision_lakebase.sh
+# -> prints PGHOST and ENDPOINT_NAME. Paste both into .env, then re-source it:
+set -a; source .env; set +a
 ```
+
+(The script is idempotent — safe to re-run; it skips anything that already exists. It
+wraps the `databricks postgres create-project` / `create database` CLI calls so you don't
+run them by hand.)
 
 **How the state gets "locked" in Lakebase:** `server/db.py` opens a psycopg pool whose
 `OAuthConnection` mints a fresh Lakebase token per connection (via
@@ -145,35 +155,27 @@ Then open **Serving → Unity AI Gateway → Agents** in the UI — your agent i
 
 ---
 
-## Part D — Deploy the app to Databricks Apps
+## Part D — Deploy the app to Databricks Apps — **scripts**
+
+Deploying involves three ordered steps (the app SP must exist before you can grant it):
 
 ```bash
 set -a; source .env; set +a
-EMAIL=$(databricks current-user me -p "$DATABRICKS_PROFILE" -o json | jq -r '.userName')
-DEST="/Users/$EMAIL/langgraph-sample"
 
-# 1. Fill app.yaml env (PGHOST/PGUSER/ENDPOINT_NAME/UAIG_ENDPOINT) with your values.
-# 2. Create the app
-databricks apps create langgraph-sample -p "$DATABRICKS_PROFILE"
+# 1. Create the app + sync + bind gateway resource. Prints the app SP client id.
+bash setup/03_deploy_app.sh
+#    -> copy the printed "APP SP client id"
 
-# 3. Sync source (exclude heavy/dev dirs; do NOT ship uv.lock — proxy wheel URLs rotate)
-databricks sync . "$DEST" --exclude node_modules --exclude .venv --exclude __pycache__ \
-  --exclude .git --exclude frontend --exclude mlruns --exclude uv.lock -p "$DATABRICKS_PROFILE"
+# 2. Grant that SP everything it needs (Postgres role + table grants + gateway CAN_QUERY)
+APP_SP_CLIENT_ID=<paste-from-step-1> bash setup/02_grant_app_sp.sh
 
-# 4. Authorize the app SP for the gateway endpoint (governed LLM calls)
-databricks apps update langgraph-sample --json '{
-  "resources": [{"name":"gateway_endpoint",
-    "serving_endpoint":{"name":"databricks-claude-sonnet-5","permission":"CAN_QUERY"}}]
-}' -p "$DATABRICKS_PROFILE"
-
-# 5. Deploy + get URL
-databricks apps deploy langgraph-sample --source-code-path "/Workspace/$DEST" -p "$DATABRICKS_PROFILE"
-databricks apps get langgraph-sample -p "$DATABRICKS_PROFILE" | jq -r '.url'
+# 3. Set PGUSER=<app SP client id> in app.yaml, then re-run the deploy to pick it up
+bash setup/03_deploy_app.sh
 ```
 
-Also attach the **Lakebase database** as an app resource (Compute → Apps → Edit → add
-Database, "Can connect"), or set `PGHOST/PGUSER/PGPORT/PGDATABASE` explicitly in `app.yaml`
-(this template uses the explicit form). Logs: append `/logz` to the app URL.
+`setup/02_grant_app_sp.sh` is the code that **provides all access to the app's service
+principal** — the Postgres role, the table/schema grants, and gateway `CAN_QUERY` — the
+things that otherwise fail with `invalid_client` / 403. Logs: append `/logz` to the app URL.
 
 ---
 

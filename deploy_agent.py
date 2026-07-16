@@ -1,14 +1,28 @@
-"""Log -> register to Unity Catalog -> deploy to Model Serving -> govern with AI Gateway.
+"""Register the agent (and its LLM) into Unity AI Gateway.
 
-Run locally against the FEVM workspace:
+There are TWO registrations with Unity AI Gateway — this script handles both concerns:
 
-    export DATABRICKS_PROFILE=Fevm-fevm-conde
-    export SERVING_ENDPOINT="databricks-claude-sonnet-5"
-    uv run python deploy_agent.py --catalog <catalog> --schema <schema>
+  1. THE LLM  — governed by ROUTING, not by a separate registration step.
+     The agent calls the model via ChatDatabricks(use_ai_gateway=True) pointed at the
+     gateway endpoint named by UAIG_ENDPOINT (see server/graph.py). That endpoint is
+     what this script DECLARES as a dependency below
+     (resources=[DatabricksServingEndpoint(UAIG_ENDPOINT)]), so the registered agent is
+     linked to its LLM endpoint and the LLM's traffic is governed by the gateway.
+     -> To point at a different LLM, change UAIG_ENDPOINT (one value). Foundation-model
+        endpoints are gateway-accessible out of the box; for an EXTERNAL model you first
+        create a gateway/serving endpoint for it in the workspace, then use its name here.
 
-After deploy, the agent appears in the Unity AI Gateway Agents tab automatically.
-Governance (rate limits, guardrails, usage tracking) is configured in the new Unity
-AI Gateway UI — the old put_ai_gateway API is NOT supported for agent endpoints.
+  2. THE AGENT — registered EXPLICITLY here: log -> register to Unity Catalog ->
+     agents.deploy() -> a Model Serving endpoint that appears on the Unity AI Gateway
+     "Agents" inventory. Governance (rate limits, guardrails, usage tracking) is then
+     configured in the Unity AI Gateway UI. (The old put_ai_gateway API is not used for
+     agent endpoints.)
+
+Run locally against the workspace (reads UC_CATALOG / UC_SCHEMA / UAIG_ENDPOINT from .env):
+
+    set -a; source .env; set +a
+    export DATABRICKS_CONFIG_PROFILE="$DATABRICKS_PROFILE"
+    uv run python deploy_agent.py
 """
 import argparse
 import os
