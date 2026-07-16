@@ -6,7 +6,23 @@ what each file does and how a message flows through the system.
 
 ---
 
-## The 10,000-ft view
+## The big picture
+
+![Databricks agent governance architecture](diagrams/databricks_agent_governance_preview.png)
+
+Consumers (chat UI or other apps) call **one** custom agent definition (`server/graph.py`).
+Every LLM call is **routed through Unity AI Gateway** — the single control plane that applies
+guardrails + rate limits and **meters usage/cost per agent** (`system.ai_gateway.usage` →
+AI/BI dashboard). Conversation memory lives in **Lakebase (Postgres)** per `thread_id`. The
+same agent is registered via `deploy_agent.py` so it appears on the **Agents inventory** in
+Unity Catalog — so *every* agent you build is governed and cost-attributed **in one place**.
+
+> Editable diagram sources are in [`docs/diagrams/`](diagrams/) — `.drawio` (open in
+> [draw.io](https://app.diagrams.net) / Lucidchart) and `.mmd` (Mermaid).
+
+---
+
+## The 10,000-ft view (component flow)
 
 Every LLM call goes through **Unity AI Gateway** (🛡️). Every conversation is saved in
 **Lakebase Postgres** (💾). Every agent is inventoried and cost-attributed in one place in

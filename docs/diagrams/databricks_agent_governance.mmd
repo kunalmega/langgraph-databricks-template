@@ -1,0 +1,55 @@
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Helvetica","fontSize":"15px","primaryColor":"#F0F7FF","primaryBorderColor":"#1565C0","lineColor":"#546E7A"}}}%%
+flowchart LR
+    subgraph CONS["Consumers"]
+        U1["Business user<br/>(chat UI)"]
+        U2["Other apps<br/>(programmatic)"]
+    end
+
+    subgraph AGENT["Custom agent — one definition"]
+        direction TB
+        A1["Databricks App API<br/>POST /api/chat · runs the agent<br/>+ Lakebase memory"]
+        CORE["Custom LangGraph agent<br/>server/graph.py · tools + logic"]
+        DEPLOY["Register & deploy<br/>deploy_agent.py → Unity Catalog"]
+        A2["Governed Agent endpoint<br/>Agents inventory on AI Gateway"]
+    end
+
+    subgraph GW["Unity AI Gateway — single control plane"]
+        direction TB
+        G1["Agent governance<br/>ACLs · versioning · guardrails"]
+        G2["Model endpoint governance<br/>rate limits · guardrails"]
+        G3["Per-agent metering<br/>requester + request_tags {agent, app}"]
+        G4["Every LLM call routed through Gateway"]
+    end
+
+    M["Governed model endpoint<br/>(e.g. databricks-claude-sonnet-5)<br/>lives in Unity AI Gateway"]
+
+    subgraph INSIGHT["State & governance insights"]
+        direction TB
+        L["Lakebase (Postgres)<br/>conversation memory per thread_id"]
+        S["system.ai_gateway.usage<br/>tokens · latency · cost per agent"]
+        D["AI/BI dashboard<br/>cost & usage per agent"]
+    end
+
+    U1 --> A1
+    U2 --> A2
+    U2 -.-> A1
+    A1 --> CORE
+    CORE -. package & register .-> DEPLOY
+    DEPLOY -. deploy .-> A2
+    CORE == LLM call (tagged) ==> G4
+    A2 == invocations ==> G1
+    G1 --> G4
+    G4 == governed route ==> M
+    G2 -.-> M
+    G3 -. logs every call .-> S
+    S -.-> D
+    A1 -. save/load .-> L
+
+    classDef gov fill:#FFEBEE,stroke:#B71C1C,color:#000;
+    classDef model fill:#FFF3E0,stroke:#E65100,color:#000;
+    classDef entry fill:#E3F2FD,stroke:#1565C0,color:#000;
+    classDef core fill:#E8F5E9,stroke:#2E7D32,color:#000;
+    class G1,G2,G3,G4 gov;
+    class M model;
+    class A1,A2 entry;
+    class CORE core;
