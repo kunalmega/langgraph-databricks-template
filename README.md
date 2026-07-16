@@ -150,8 +150,9 @@ Confirm:
 databricks model-versions list "$UC_CATALOG.$UC_SCHEMA.langgraph_sample_agent" \
   -p "$DATABRICKS_PROFILE" -o json | jq -r '.[] | "v\(.version) \(.status)"'
 ```
-> If UC registration times out (transient `UC-TKTLK`), just re-run. It won't re-log — to
-> skip re-logging pass the logged-model id: `python register_from_run.py --model-id <m-...>`.
+> If UC registration times out (transient `UC-TKTLK`), just re-run `deploy_agent.py`. To
+> skip re-logging on the retry, reuse the model it already logged — the script prints
+> `MODEL_URI=...`; pass it back in: `MODEL_URI=models:/m-xxxx uv run python deploy_agent.py`.
 
 ### Step 5 — Verify both ways work
 
@@ -214,8 +215,7 @@ Register the agent (Step 4) when you want it inventoried, versioned, and indepen
 | `server/routes/chat.py` | `POST /api/chat` — runs the agent with Lakebase memory. |
 | `app.py` | FastAPI web server; opens the pool, serves API + UI. |
 | `agent.py` | Same agent wrapped as an MLflow ChatAgent (for the endpoint). |
-| `deploy_agent.py` | Log → register → deploy the agent onto the Gateway Agents page. |
-| `register_from_run.py` | Retry helper: register an already-logged model (skips re-log). |
+| `deploy_agent.py` | Log → register → deploy the agent onto the Gateway Agents page. (Set `MODEL_URI=models:/m-...` to skip re-logging on a retry.) |
 | `app.yaml` | Deployed-app config: env vars the app sees (incl. `UAIG_ENDPOINT`). |
 | `static/index.html` | No-build chat UI (so npm isn't required). |
 | `setup/01_provision_lakebase.sh` | **Creates Lakebase** (project + database). |
@@ -239,7 +239,7 @@ Register the agent (Step 4) when you want it inventoried, versioned, and indepen
 | `403 Forbidden` calling the agent endpoint | Caller lacks **CAN_QUERY** on the serving endpoint. |
 | `cannot get token: multiple profiles match host` | `export DATABRICKS_CONFIG_PROFILE=<profile>` (MLflow auth disambiguation). |
 | `CREATE INDEX CONCURRENTLY cannot run inside a transaction` | Handled — `/api/setup` uses `autocommit=True`. |
-| Model registration times out (`UC-TKTLK`) | Transient UC issue — re-run `deploy_agent.py` / `register_from_run.py --model-id`. |
+| Model registration times out (`UC-TKTLK`) | Transient UC issue — re-run `deploy_agent.py` (reuse its printed `MODEL_URI=` to skip re-logging). |
 | `temperature not supported` | Reasoning models (e.g. claude-sonnet-5) reject it — `build_llm()` omits it. |
 
 ---

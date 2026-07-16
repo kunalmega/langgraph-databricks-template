@@ -23,6 +23,11 @@ Run locally against the workspace (reads UC_CATALOG / UC_SCHEMA / UAIG_ENDPOINT 
     set -a; source .env; set +a
     export DATABRICKS_CONFIG_PROFILE="$DATABRICKS_PROFILE"
     uv run python deploy_agent.py
+
+Retry without re-logging: the script prints `MODEL_URI=...` after logging. If a later
+step (e.g. UC registration) times out, re-run and reuse that model instead of re-logging:
+
+    MODEL_URI=models:/m-xxxx uv run python deploy_agent.py
 """
 import argparse
 import os
