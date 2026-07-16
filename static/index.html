@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LangGraph Sample Agent</title>
+  <style>
+    :root { --brand: #ff3621; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; margin: 0; background: #f4f4f5; }
+    .page { max-width: 720px; margin: 0 auto; padding: 24px; display: flex;
+            flex-direction: column; height: 100vh; }
+    h2 { margin: 0 0 4px; }
+    .sub { color: #666; font-size: 13px; margin-bottom: 16px; }
+    #log { flex: 1; overflow-y: auto; border: 1px solid #e0e0e0; border-radius: 8px;
+           padding: 16px; background: #fff; }
+    .bubble { padding: 8px 12px; border-radius: 12px; margin: 4px 0; max-width: 80%;
+              white-space: pre-wrap; }
+    .user { background: var(--brand); color: #fff; margin-left: auto; }
+    .bot  { background: #eee; color: #111; margin-right: auto; }
+    .row { display: flex; gap: 8px; margin-top: 12px; }
+    #input { flex: 1; padding: 10px 12px; border-radius: 8px; border: 1px solid #ccc; }
+    button { padding: 10px 18px; border-radius: 8px; border: none; background: var(--brand);
+             color: #fff; cursor: pointer; }
+    button:disabled { opacity: .5; cursor: default; }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <h2>LangGraph Sample Agent</h2>
+    <div class="sub" id="sub">ReAct agent + calculator tool. State persists in Lakebase.</div>
+    <div id="log"></div>
+    <div class="row">
+      <input id="input" placeholder="Ask something, e.g. what is 23 * 19?" autofocus />
+      <button id="send">Send</button>
+    </div>
+  </div>
+  <script>
+    const log = document.getElementById("log");
+    const input = document.getElementById("input");
+    const btn = document.getElementById("send");
+    const sub = document.getElementById("sub");
+    let threadId = null;
+
+    function bubble(text, who) {
+      const d = document.createElement("div");
+      d.className = "bubble " + who;
+      d.textContent = text;
+      log.appendChild(d);
+      log.scrollTop = log.scrollHeight;
+      return d;
+    }
+
+    async function send() {
+      const text = input.value.trim();
+      if (!text) return;
+      input.value = "";
+      btn.disabled = true;
+      bubble(text, "user");
+      const pending = bubble("…", "bot");
+      try {
+        const res = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: text, thread_id: threadId }),
+        });
+        const data = await res.json();
+        threadId = data.thread_id;
+        pending.textContent = data.reply;
+        sub.textContent = "ReAct agent + calculator tool. State persists in Lakebase (thread "
+          + threadId.slice(0, 8) + ").";
+      } catch (e) {
+        pending.textContent = "Request failed.";
+      } finally {
+        btn.disabled = false;
+        input.focus();
+      }
+    }
+
+    btn.onclick = send;
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
+  </script>
+</body>
+</html>

@@ -1,0 +1,38 @@
+# Databricks App config (DEPLOYED values for the langgraph-sample app in Fevm-fevm-conde).
+# For a fresh reuse of the template, replace these with your own (see .env.example).
+#
+# Governance: the agent routes LLM calls through Unity AI Gateway via
+# ChatDatabricks(use_ai_gateway=True). UAIG_ENDPOINT is also attached as a
+# CAN_QUERY app resource so the app service principal is authorized.
+command:
+  - "python"
+  - "-m"
+  - "uvicorn"
+  - "app:app"
+  - "--host"
+  - "0.0.0.0"
+  - "--port"
+  - "8000"
+
+env:
+  # --- Lakebase (state store) ---
+  - name: ENDPOINT_NAME
+    value: "projects/langgraph-sample/branches/production/endpoints/primary"
+  - name: PGHOST
+    value: "ep-noisy-violet-d2mya5gt.database.us-east-1.cloud.databricks.com"
+  # PGUSER = the app service-principal client id. OAuthConnection mints the
+  # Postgres password via generate_database_credential at runtime.
+  - name: PGUSER
+    value: "db5da372-cc74-434c-829d-2039902c3374"
+  - name: PGDATABASE
+    value: "langgraph_app"
+  - name: PGPORT
+    value: "5432"
+  - name: PGSSLMODE
+    value: "require"
+
+  # --- Unity AI Gateway ---
+  - name: UAIG_ENDPOINT
+    value: "databricks-claude-sonnet-5"
+  - name: AGENT_NAME
+    value: "langgraph-sample-agent"
