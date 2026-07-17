@@ -1,9 +1,9 @@
 # Databricks App config (DEPLOYED values for the langgraph-sample app in Fevm-fevm-conde).
 # For a fresh reuse of the template, replace these with your own (see .env.example).
 #
-# Governance: the agent routes LLM calls through Unity AI Gateway via
-# ChatDatabricks(use_ai_gateway=True). UAIG_ENDPOINT is also attached as a
-# CAN_QUERY app resource so the app service principal is authorized.
+# Governance: the agent routes LLM calls through the Unity AI Gateway MODEL SERVICE
+# 'sonnet4' (primary + fallback + guardrails), authenticated with MODEL_SERVICE_TOKEN
+# from a Databricks secret. No direct model-serving endpoint is used.
 command:
   - "python"
   - "-m"
@@ -31,9 +31,8 @@ env:
   - name: PGSSLMODE
     value: "require"
 
-  # --- Unity AI Gateway ---
+  # --- Unity AI Gateway (model service) ---
   # Route through the governed model service 'sonnet4' (primary + fallback, guardrails).
-  # MODEL_SERVICE takes precedence over UAIG_ENDPOINT in server/graph.py.
   - name: MODEL_SERVICE
     value: "fevm_cme_conde_catalog.langgraph_demo.sonnet4"
   # Token used to call the model service — injected from a Databricks secret (never
@@ -41,7 +40,5 @@ env:
   # granted READ on that scope. See README Step 3.5.
   - name: MODEL_SERVICE_TOKEN
     valueFrom: "model_service_token"
-  - name: UAIG_ENDPOINT
-    value: "databricks-claude-sonnet-5"
   - name: AGENT_NAME
     value: "langgraph-sample-agent"
