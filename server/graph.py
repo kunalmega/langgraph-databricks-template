@@ -72,26 +72,52 @@ AGENT_NAME = os.environ.get("AGENT_NAME", "langgraph-sample-agent")
 APP_NAME = os.environ.get("DATABRICKS_APP_NAME", "langgraph-sample")
 
 
-def build_llm() -> ChatDatabricks:
-    """LangChain chat model routed through Unity AI Gateway.
+# A Unity AI Gateway REQUEST TAG that names this agent/app in system.ai_gateway.usage.
+_REQUEST_TAGS = '{"agent":"%s","app":"%s"}' % (AGENT_NAME, APP_NAME)
 
-    `model` is the name of the Unity AI Gateway endpoint (set via
-    UAIG_ENDPOINT / SERVING_ENDPOINT). use_ai_gateway=True makes the client
-    route through the gateway and handle auth automatically. We attach gateway
-    request tags so this agent is identifiable in the gateway usage view.
-    Note: some models (e.g. claude-sonnet-5 reasoning) reject temperature.
+# Optional: a Unity AI Gateway "model service" (a UC object catalog.schema.name that
+# fronts a primary + fallback model with governance). Set MODEL_SERVICE to its fully
+# qualified name to route through it instead of a plain endpoint.
+MODEL_SERVICE = os.environ.get("MODEL_SERVICE")
+
+
+def build_llm():
+    """Chat model routed through Unity AI Gateway. Two modes:
+
+    1. MODEL_SERVICE set  -> route to a Unity AI Gateway *model service*
+       (catalog.schema.name, e.g. fevm_cme_conde_catalog.langgraph_demo.sonnet4) via the
+       native gateway URL https://<host>/ai-gateway/mlflow/v1. This is the governed,
+       fallback-protected path (primary + fallback configured on the model service).
+    2. otherwise           -> ChatDatabricks(use_ai_gateway=True) against UAIG_ENDPOINT.
+
+    Both attach request tags so the agent is attributable in the gateway usage view.
+    Note: some models (e.g. claude-sonnet-5 reasoning) reject temperature, so we omit it.
     """
+    tags_header = {"Databricks-Ai-Gateway-Request-Tags": _REQUEST_TAGS}
+
+    if MODEL_SERVICE:
+        from langchain_openai import ChatOpenAI
+
+        from .config import get_oauth_token, get_workspace_host
+
+        # Auth for the model service: prefer an explicit token (a PAT that has EXECUTE on
+        # the model service — set MODEL_SERVICE_TOKEN, ideally from a Databricks secret).
+        # Falls back to the app/user OAuth token when no explicit token is provided.
+        token = os.environ.get("MODEL_SERVICE_TOKEN") or get_oauth_token()
+        base_url = f"{get_workspace_host().rstrip('/')}/ai-gateway/mlflow/v1"
+        return ChatOpenAI(
+            model=MODEL_SERVICE,
+            base_url=base_url,
+            api_key=token,
+            max_tokens=1024,
+            default_headers=tags_header,
+        )
+
     return ChatDatabricks(
         model=get_serving_endpoint(),
         use_ai_gateway=True,
         max_tokens=1024,
-        extra_params={
-            "extra_headers": {
-                "Databricks-Ai-Gateway-Request-Tags": (
-                    '{"agent":"%s","app":"%s"}' % (AGENT_NAME, APP_NAME)
-                )
-            }
-        },
+        extra_params={"extra_headers": tags_header},
     )
 
 

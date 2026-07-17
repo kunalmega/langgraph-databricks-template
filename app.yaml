@@ -32,6 +32,15 @@ env:
     value: "require"
 
   # --- Unity AI Gateway ---
+  # Route through the governed model service 'sonnet4' (primary + fallback, guardrails).
+  # MODEL_SERVICE takes precedence over UAIG_ENDPOINT in server/graph.py.
+  - name: MODEL_SERVICE
+    value: "fevm_cme_conde_catalog.langgraph_demo.sonnet4"
+  # Token used to call the model service — injected from a Databricks secret (never
+  # hardcoded). Requires: scope 'llm' with key 'model_service_token', and the app SP
+  # granted READ on that scope. See README Step 3.5.
+  - name: MODEL_SERVICE_TOKEN
+    valueFrom: "model_service_token"
   - name: UAIG_ENDPOINT
     value: "databricks-claude-sonnet-5"
   - name: AGENT_NAME
