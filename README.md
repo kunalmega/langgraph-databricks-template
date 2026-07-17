@@ -131,6 +131,24 @@ bash setup/03_deploy_app.sh
 it is what causes `invalid_client` (Lakebase) or `403` (gateway). Logs: append `/logz` to
 the app URL (`databricks apps get <app> -p <profile> | jq -r .url`).
 
+### Step 3.5 — (Optional) Own a governed LLM endpoint with fallback
+
+By default `UAIG_ENDPOINT` points at a shared Databricks foundation-model endpoint —
+governed, but you don't control its config. To get **model routing + fallback/swap** across
+providers with your own guardrails/limits, create **your own** governed LLM endpoint:
+
+```bash
+# one-time: store an API token as a secret (you choose the scope/token)
+databricks secrets create-scope llm -p "$DATABRICKS_PROFILE"
+databricks secrets put-secret  llm pat -p "$DATABRICKS_PROFILE"     # value = a Databricks PAT
+export LLM_TOKEN_SECRET='{{secrets/llm/pat}}'
+
+uv run python register_llm_gateway.py     # creates GATEWAY_LLM_ENDPOINT: primary + fallback + guardrails + usage
+```
+Then set `UAIG_ENDPOINT=<GATEWAY_LLM_ENDPOINT>` in `.env` / `app.yaml` so the agent's LLM
+calls flow through **your** endpoint (fallback on 429/5xx, PII guardrails, per-endpoint
+rate limit, usage tracking). This is the "Model routing · Fallback and swap" box in the diagram.
+
 ### Step 4 — Register the agent into Unity AI Gateway ⭐
 
 This makes the agent a **governed, versioned entity on the Gateway → Agents page**.
@@ -216,6 +234,7 @@ Register the agent (Step 4) when you want it inventoried, versioned, and indepen
 | `app.py` | FastAPI web server; opens the pool, serves API + UI. |
 | `agent.py` | Same agent wrapped as an MLflow ChatAgent (for the endpoint). |
 | `deploy_agent.py` | Log → register → deploy the agent onto the Gateway Agents page. (Set `MODEL_URI=models:/m-...` to skip re-logging on a retry.) |
+| `register_llm_gateway.py` | (Optional) Create your own governed LLM endpoint: primary + fallback model, guardrails, rate limit, usage. |
 | `app.yaml` | Deployed-app config: env vars the app sees (incl. `UAIG_ENDPOINT`). |
 | `static/index.html` | No-build chat UI (so npm isn't required). |
 | `setup/01_provision_lakebase.sh` | **Creates Lakebase** (project + database). |

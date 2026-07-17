@@ -208,12 +208,19 @@ endpoint receives full history each call.)
 
 This is the part people confuse. There are **two** registrations:
 
-**(a) The LLM is registered/governed** — automatically, by routing.
-The moment the agent calls the model via `ChatDatabricks(use_ai_gateway=True)`, that LLM
-traffic goes through Unity AI Gateway and is governed (rate limits, usage tracking,
-guardrails). You don't "register" the LLM with code — you *route through* the gateway
-endpoint (`UAIG_ENDPOINT`), and the gateway governs it. Grant is done in
-`setup/02_grant_app_sp.sh` step (c) (`CAN_QUERY` on the endpoint).
+**(a) The LLM is governed two ways** — by routing (always) and by owning the endpoint (optional).
+
+- *By routing (always):* the agent calls the model via `ChatDatabricks(use_ai_gateway=True)`
+  pointed at `UAIG_ENDPOINT`, so its traffic is governed (rate limits, usage, guardrails).
+  If `UAIG_ENDPOINT` is a shared Databricks foundation-model endpoint, you get governance
+  but you don't control that endpoint's config. Grant: `setup/02_grant_app_sp.sh` step (c).
+- *By owning the endpoint (optional — `register_llm_gateway.py`):* create **your own** serving
+  endpoint that serves a **primary + fallback model** with **traffic routing**, and attach an
+  AI Gateway config (PII guardrails, rate limit, usage tracking, `fallback_config=enabled`).
+  Point `UAIG_ENDPOINT` at it. This is what gives you **model routing + fallback/swap** across
+  providers (Claude / OpenAI / Llama / Mistral) — the "Model routing · Fallback and swap" box
+  in the diagram. External providers need an API token via a secret reference
+  (`LLM_TOKEN_SECRET="{{secrets/scope/key}}"`) — never hardcoded.
 
 **(b) The AGENT is registered** — explicitly, by `deploy_agent.py`.
 This makes your agent a first-class, versioned entity on the Gateway **Agents** page:
