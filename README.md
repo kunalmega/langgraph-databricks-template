@@ -96,8 +96,11 @@ paste both into `.env`, then re-source it (`set -a; source .env; set +a`). Idemp
 ### Step 2 — Run & test locally
 
 ```bash
-uv run uvicorn app:app --reload --port 8000
+# The /api/setup route is gated off by default (it issues DDL). Enable it just for
+# this one-time bootstrap, then leave it off. (Alternatively provision via setup/ scripts.)
+ENABLE_SETUP_ROUTE=true uv run uvicorn app:app --reload --port 8000
 curl -sX POST localhost:8000/api/setup     # once: creates the checkpoint tables
+curl -s localhost:8000/api/ready           # readiness: checks Lakebase + LLM config
 
 # Two turns on the same thread → proves memory persists in Lakebase
 TID=$(curl -sX POST localhost:8000/api/chat -H 'Content-Type: application/json' \

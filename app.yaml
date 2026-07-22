@@ -1,9 +1,15 @@
-# Databricks App config (DEPLOYED values for the langgraph-sample app in Fevm-fevm-conde).
-# For a fresh reuse of the template, replace these with your own (see .env.example).
+# Databricks App config — TEMPLATE. Replace every <PLACEHOLDER> with your own value.
 #
-# Governance: the agent routes LLM calls through the Unity AI Gateway MODEL SERVICE
-# 'sonnet4' (primary + fallback + guardrails), authenticated with MODEL_SERVICE_TOKEN
-# from a Databricks secret. No direct model-serving endpoint is used.
+# These are the environment variables the deployed app sees. For LOCAL runs the
+# same values come from .env instead (see .env.example). Nothing here is a secret —
+# secrets are injected via `valueFrom` from a Databricks secret scope.
+#
+# Two ways to govern the LLM (pick one):
+#   A) Point UAIG_ENDPOINT at a Unity AI Gateway endpoint (foundation model or your
+#      own governed endpoint from register_llm_gateway.py). Simplest; start here.
+#   B) Route through a Unity AI Gateway MODEL SERVICE (catalog.schema.name) with a
+#      primary + fallback model, authenticated by MODEL_SERVICE_TOKEN from a secret.
+# The block below shows (A) active and (B) commented out.
 command:
   - "python"
   - "-m"
@@ -16,14 +22,15 @@ command:
 
 env:
   # --- Lakebase (state store) ---
+  # Paths/hosts are printed by setup/01_provision_lakebase.sh.
   - name: ENDPOINT_NAME
-    value: "projects/langgraph-sample/branches/production/endpoints/primary"
+    value: "projects/<LAKEBASE_PROJECT>/branches/production/endpoints/primary"
   - name: PGHOST
-    value: "ep-noisy-violet-d2mya5gt.database.us-east-1.cloud.databricks.com"
-  # PGUSER = the app service-principal client id. OAuthConnection mints the
-  # Postgres password via generate_database_credential at runtime.
+    value: "<PGHOST from setup/01 output>"
+  # PGUSER = the app service-principal client id (from `databricks apps get <app>`).
+  # OAuthConnection mints the Postgres password via generate_database_credential.
   - name: PGUSER
-    value: "db5da372-cc74-434c-829d-2039902c3374"
+    value: "<APP_SP_CLIENT_ID>"
   - name: PGDATABASE
     value: "langgraph_app"
   - name: PGPORT
@@ -31,14 +38,27 @@ env:
   - name: PGSSLMODE
     value: "require"
 
-  # --- Unity AI Gateway (model service) ---
-  # Route through the governed model service 'sonnet4' (primary + fallback, guardrails).
-  - name: MODEL_SERVICE
-    value: "fevm_cme_conde_catalog.langgraph_demo.sonnet4"
-  # Token used to call the model service — injected from a Databricks secret (never
-  # hardcoded). Requires: scope 'llm' with key 'model_service_token', and the app SP
-  # granted READ on that scope. See README Step 3.5.
-  - name: MODEL_SERVICE_TOKEN
-    valueFrom: "model_service_token"
+  # --- Unity AI Gateway (option A: a gateway endpoint) ---
+  - name: UAIG_ENDPOINT
+    value: "<UAIG_ENDPOINT e.g. databricks-claude-sonnet-5 or your governed endpoint>"
+
+  # --- Unity AI Gateway (option B: a governed model service) ---
+  # Uncomment to route through a model service instead of UAIG_ENDPOINT.
+  # - name: MODEL_SERVICE
+  #   value: "<catalog>.<schema>.<model_service_name>"
+  # - name: MODEL_SERVICE_AUTH
+  #   value: "token"            # "token" (needs MODEL_SERVICE_TOKEN) or "oauth"
+  # - name: MODEL_SERVICE_TOKEN
+  #   valueFrom: "<secret key configured on this app's resources>"
+
   - name: AGENT_NAME
-    value: "langgraph-sample-agent"
+    value: "<AGENT_NAME e.g. langgraph-sample-agent>"
+
+  # --- Operational toggles (safe defaults) ---
+  # Require the forwarded end-user identity on /api/chat (recommended multi-tenant).
+  - name: REQUIRE_CALLER_IDENTITY
+    value: "false"
+  # The one-time /api/setup DDL route is OFF by default. Enable only for a bootstrap
+  # run, then set back to "false". Prefer running setup/ scripts for provisioning.
+  - name: ENABLE_SETUP_ROUTE
+    value: "false"

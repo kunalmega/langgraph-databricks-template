@@ -2,17 +2,63 @@
 
 Handlers are sync `def` so FastAPI runs them in a threadpool — correct for
 psycopg's sync connection pool and the PostgresSaver checkpointer.
+
+Caller identity & authorization
+-------------------------------
+A Databricks App receives the end user's identity in forwarded headers
+(X-Forwarded-User / X-Forwarded-Email / X-Forwarded-Access-Token). This route
+extracts that into a `CallerContext` and passes it into the agent run, so tool
+execution can make per-caller authorization decisions and calls are attributable
+to a real user. When REQUIRE_CALLER_IDENTITY is set, an unauthenticated request
+is rejected (401) instead of running anonymously — the right default for
+multi-tenant deployments.
 """
 import uuid
+from dataclasses import dataclass
+from typing import Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from langgraph.checkpoint.postgres import PostgresSaver
 from pydantic import BaseModel
 
-from ..db import pool
+from ..db import get_pool
 from ..graph import build_graph
+from ..settings import get_settings
 
 router = APIRouter()
+
+
+@dataclass
+class CallerContext:
+    """Who is making this request (from Databricks Apps forwarded headers)."""
+
+    user: Optional[str]
+    email: Optional[str]
+    request_id: str
+
+    @property
+    def is_authenticated(self) -> bool:
+        return bool(self.user or self.email)
+
+
+def get_caller(
+    request: Request,
+    x_forwarded_user: Optional[str] = Header(default=None),
+    x_forwarded_email: Optional[str] = Header(default=None),
+) -> CallerContext:
+    """Build the caller context and enforce identity when required."""
+    settings = get_settings()
+    # request.state.request_id is set by the correlation middleware (app.py).
+    request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+    caller = CallerContext(
+        user=x_forwarded_user, email=x_forwarded_email, request_id=request_id
+    )
+    if settings.require_caller_identity and not caller.is_authenticated:
+        raise HTTPException(
+            status_code=401,
+            detail="Caller identity required but no forwarded user header present.",
+        )
+    return caller
 
 
 class ChatRequest(BaseModel):
@@ -26,17 +72,29 @@ class ChatResponse(BaseModel):
 
 
 @router.post("/chat", response_model=ChatResponse)
-def chat(req: ChatRequest) -> ChatResponse:
+def chat(req: ChatRequest, caller: CallerContext = Depends(get_caller)) -> ChatResponse:
+    # Namespace threads by caller so one user cannot resume another's conversation
+    # by guessing a thread_id. Anonymous callers (identity not required) share the
+    # "anon" namespace.
+    owner = caller.email or caller.user or "anon"
     thread_id = req.thread_id or str(uuid.uuid4())
 
     # PostgresSaver stores checkpoints in the Lakebase database. It borrows a
     # connection from the shared OAuth pool for the duration of the call.
-    with pool.connection() as conn:
+    with get_pool().connection() as conn:
         checkpointer = PostgresSaver(conn)
         graph = build_graph(checkpointer=checkpointer)
         result = graph.invoke(
             {"messages": [{"role": "user", "content": req.message}]},
-            config={"configurable": {"thread_id": thread_id}},
+            config={
+                "configurable": {
+                    "thread_id": f"{owner}:{thread_id}",
+                    # Propagate caller context so tools can authorize per-user.
+                    "caller_user": caller.user,
+                    "caller_email": caller.email,
+                    "request_id": caller.request_id,
+                }
+            },
         )
 
     reply = result["messages"][-1].content
@@ -47,10 +105,17 @@ def chat(req: ChatRequest) -> ChatResponse:
 def setup() -> dict:
     """One-time: create the LangGraph checkpoint tables in Lakebase.
 
-    setup() issues CREATE INDEX CONCURRENTLY, which cannot run in a transaction,
-    so the connection must be in autocommit mode.
+    OPERATIONALLY SENSITIVE — this issues DDL (CREATE INDEX CONCURRENTLY) against
+    the state store. It is gated behind ENABLE_SETUP_ROUTE and returns 404 unless
+    explicitly enabled, so it is not a general public route. Prefer running the
+    provisioning script (setup/) for bootstrap; enable this only if you must run
+    it in-app, then disable it again.
     """
-    with pool.connection() as conn:
+    if not get_settings().enable_setup_route:
+        raise HTTPException(status_code=404, detail="Not found.")
+
+    # CREATE INDEX CONCURRENTLY cannot run in a transaction -> autocommit.
+    with get_pool().connection() as conn:
         conn.autocommit = True
         PostgresSaver(conn).setup()
     return {"status": "checkpoint tables created"}

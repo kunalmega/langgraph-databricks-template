@@ -99,11 +99,26 @@ def build_llm():
         from langchain_openai import ChatOpenAI
 
         from .config import get_oauth_token, get_workspace_host
+        from .settings import get_settings
 
-        # Auth for the model service: prefer an explicit token (a PAT that has EXECUTE on
-        # the model service — set MODEL_SERVICE_TOKEN, ideally from a Databricks secret).
-        # Falls back to the app/user OAuth token when no explicit token is provided.
-        token = os.environ.get("MODEL_SERVICE_TOKEN") or get_oauth_token()
+        # Auth for the model service is an EXPLICIT identity choice, so authorization
+        # behavior is predictable across app and local execution (MODEL_SERVICE_AUTH):
+        #   "token" (default) -> require MODEL_SERVICE_TOKEN (a PAT/secret with EXECUTE
+        #                        on the model service). We do NOT silently fall back to
+        #                        the caller's OAuth identity.
+        #   "oauth"           -> deliberately call as the current app/user identity.
+        auth_mode = get_settings().model_service_auth
+        explicit_token = os.environ.get("MODEL_SERVICE_TOKEN")
+        if auth_mode == "oauth":
+            token = get_oauth_token()
+        elif explicit_token:
+            token = explicit_token
+        else:
+            raise RuntimeError(
+                "MODEL_SERVICE is set but MODEL_SERVICE_TOKEN is missing. Provide the "
+                "token (ideally a Databricks secret), or set MODEL_SERVICE_AUTH=oauth "
+                "to deliberately call the model service as the current identity."
+            )
         base_url = f"{get_workspace_host().rstrip('/')}/ai-gateway/mlflow/v1"
         return ChatOpenAI(
             model=MODEL_SERVICE,

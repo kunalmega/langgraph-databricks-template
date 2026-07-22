@@ -2,23 +2,30 @@
 
 Works both locally (via a Databricks CLI profile) and inside a Databricks App
 (via auto-injected service-principal credentials).
-"""
-import os
 
+Note on local auth: this reads DATABRICKS_PROFILE and fails clearly if it is
+missing, rather than silently defaulting to one contributor's personal profile.
+A reusable reference should never assume a specific local workspace.
+"""
 from databricks.sdk import WorkspaceClient
 
-# In a Databricks App the runtime sets DATABRICKS_APP_NAME.
-IS_DATABRICKS_APP = bool(os.environ.get("DATABRICKS_APP_NAME"))
+from .settings import get_settings
 
 
 def get_workspace_client() -> WorkspaceClient:
     """Return an authenticated WorkspaceClient for the current environment."""
-    if IS_DATABRICKS_APP:
+    settings = get_settings()
+    if settings.is_databricks_app:
         # Remote: auto-injected service principal credentials.
         return WorkspaceClient()
-    # Local: use the CLI profile (default: Fevm-fevm-conde).
-    profile = os.environ.get("DATABRICKS_PROFILE", "Fevm-fevm-conde")
-    return WorkspaceClient(profile=profile)
+    # Local: require an explicit CLI profile — do not guess a personal one.
+    if not settings.databricks_profile:
+        raise RuntimeError(
+            "DATABRICKS_PROFILE is not set. For local runs, log in with "
+            "`databricks auth login --profile <name>` and set DATABRICKS_PROFILE=<name> "
+            "in your .env. (In a deployed Databricks App this is not needed.)"
+        )
+    return WorkspaceClient(profile=settings.databricks_profile)
 
 
 def get_oauth_token() -> str:
@@ -33,8 +40,9 @@ def get_oauth_token() -> str:
 
 def get_workspace_host() -> str:
     """Workspace host URL, always with an https:// scheme."""
-    if IS_DATABRICKS_APP:
-        host = os.environ.get("DATABRICKS_HOST", "")
+    settings = get_settings()
+    if settings.is_databricks_app:
+        host = settings.databricks_host or ""
         if host and not host.startswith("http"):
             host = f"https://{host}"
         return host
@@ -47,8 +55,4 @@ def get_serving_endpoint() -> str:
     With ChatDatabricks(use_ai_gateway=True), this is the gateway endpoint name
     (UAIG_ENDPOINT). Falls back to SERVING_ENDPOINT / a foundation-model name.
     """
-    return (
-        os.environ.get("UAIG_ENDPOINT")
-        or os.environ.get("SERVING_ENDPOINT")
-        or "databricks-claude-sonnet-5"
-    )
+    return get_settings().llm_endpoint
