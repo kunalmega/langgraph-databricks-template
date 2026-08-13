@@ -111,6 +111,7 @@ def main() -> None:
                     "langchain-core==1.4.8",
                     "databricks-langchain==0.20.0",
                     "databricks-sdk>=0.40",
+                    "httpx==0.28.1",
                 ],
                 resources=[DatabricksServingEndpoint(endpoint_name=llm_endpoint)],
             )

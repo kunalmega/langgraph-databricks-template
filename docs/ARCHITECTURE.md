@@ -8,8 +8,6 @@ what each file does and how a message flows through the system.
 
 ## The big picture
 
-![Databricks agent governance architecture](diagrams/databricks_agent_governance_preview.png)
-
 Consumers (chat UI or other apps) call **one** custom agent definition (`server/graph.py`).
 Every LLM call is **routed through Unity AI Gateway** — the single control plane that applies
 guardrails + rate limits and **meters usage/cost per agent** (`system.ai_gateway.usage` →
@@ -17,12 +15,7 @@ AI/BI dashboard). Conversation memory lives in **Lakebase (Postgres)** per `thre
 same agent is registered via `deploy_agent.py` so it appears on the **Agents inventory** in
 Unity Catalog — so *every* agent you build is governed and cost-attributed **in one place**.
 
-> Editable diagram sources are in [`docs/diagrams/`](diagrams/) — `.drawio` (open in
-> [draw.io](https://app.diagrams.net) / Lucidchart) and `.mmd` (Mermaid).
-
 ### Two ways in, one governed path out
-
-![Unity AI Gateway flow — two call paths, governed routing to any model, Lakebase telemetry](diagrams/unity_ai_gateway_flow.png)
 
 The end user reaches the agent **two ways**: directly via the **FastAPI** app, or via the
 **registered Agent endpoint**. Either way, the app's **custom agent code** (LangGraph /
@@ -233,6 +226,35 @@ This makes your agent a first-class, versioned entity on the Gateway **Agents** 
 So: **routing governs the LLM; `deploy_agent.py` registers the agent.** Both are "AI
 Gateway," but they're different layers — the doc `USAGE.md` shows how to *call* each.
 
+## 6b. What about an agent that runs OUTSIDE Databricks (on Kubernetes)?
+
+You don't have to build the agent inside this template to govern it. **Any agent reachable
+over HTTP — running on EKS, AKS, GKE, or any Kubernetes cluster / server** — can be
+registered so it appears on the **Unity AI Gateway → Agents** inventory alongside your
+Databricks-native agents. See the standalone `external-agents/` folder.
+
+It's a **two-part registration** (nothing in the rest of the template is touched):
+
+1. **UC HTTP connection** — securely holds the external agent's base URL + bearer token
+   (the credential holder).
+2. **Agent service (type `EXTERNAL`)** — the governed entity that references the connection
+   and describes the agent (`base_path`, `system_prompt`). This is what shows in the inventory.
+
+```
+your agent on EKS/AKS/GKE ──referenced by──► UC HTTP connection ──used by──► Agent service (EXTERNAL)
+  (https://.../v1/chat)                       (host + bearer token)          → AI Gateway Agents inventory
+```
+
+Run it with `bash external-agents/register_external_agent.sh` (config in
+`external-agents/.env`).
+
+> **⚠️ Beta limitation:** registration + permissions/lineage **work** (the agent is visible
+> and governable), but **runtime invocation through the service is not available yet** —
+> consumers still call the external endpoint directly. That's a Databricks platform
+> limitation, not a template issue. So today this buys you **visibility + governance**, not a
+> Databricks-proxied call path. Docs:
+> https://docs.databricks.com/aws/en/ai-gateway/agent-services
+
 ## 7. One place for everything: governance, cost, and the agent inventory
 
 This is the payoff of doing it the Databricks way. **However many custom apps/agents you
@@ -300,6 +322,7 @@ flowchart TB
 | `app.py` | FastAPI web server; opens the pool, serves API + UI. |
 | `agent.py` | Same agent wrapped as an MLflow ChatAgent (for the endpoint). |
 | `deploy_agent.py` | Logs → registers → deploys the agent onto the AI Gateway Agents page. |
+| `external-agents/` | Standalone: register an agent running OUTSIDE Databricks (EKS/AKS/GKE/any HTTP) as an EXTERNAL agent service on the Agents inventory. |
 | `app.yaml` | Deployed-app config: the env vars the app sees (incl. `UAIG_ENDPOINT`). |
 | `.env.example` | The one file you edit to reuse the template. |
 | `setup/01_provision_lakebase.sh` | **CREATES Lakebase** (project + database). |

@@ -20,6 +20,9 @@ npm-debug.log*
 # Databricks
 .databricks/
 
+# Isaac tooling
+.isaac/
+
 # OS
 .DS_Store
 
