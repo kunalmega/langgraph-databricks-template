@@ -50,6 +50,11 @@ PROVIDER = os.environ.get("LLM_PROVIDER", "databricks-model-serving")
 # Primary + fallback model endpoint names (Databricks-hosted foundation models by default).
 PRIMARY_MODEL = os.environ.get("LLM_PRIMARY", "databricks-claude-sonnet-5")
 FALLBACK_MODEL = os.environ.get("LLM_FALLBACK", "databricks-claude-haiku-4-5")
+# Traffic split across the two served models (must sum to 100). Default 100/0 = pure
+# failover (fallback only used on 429/5xx). Set e.g. 80/20 for an active A/B split;
+# fallback_config still reroutes failed calls to the other served model.
+PRIMARY_PCT = int(os.environ.get("LLM_PRIMARY_PCT", "100"))
+FALLBACK_PCT = int(os.environ.get("LLM_FALLBACK_PCT", "0"))
 PROFILE = os.environ.get("DATABRICKS_PROFILE", "DEFAULT")
 # An external-model served entity needs an API token, referenced from a secret scope
 # (never hardcode it). One-time setup:
@@ -86,13 +91,19 @@ def main() -> None:
     w = WorkspaceClient(profile=PROFILE)
     workspace_url = w.config.host  # e.g. https://<workspace>.cloud.databricks.com
 
+    if PRIMARY_PCT + FALLBACK_PCT != 100:
+        raise SystemExit(
+            f"LLM_PRIMARY_PCT ({PRIMARY_PCT}) + LLM_FALLBACK_PCT ({FALLBACK_PCT}) must sum to 100."
+        )
     served = [_served("primary", PRIMARY_MODEL, workspace_url),
               _served("fallback", FALLBACK_MODEL, workspace_url)]
-    # 100% to primary; fallback_config sends failed calls to the next served entity.
+    # Traffic split across the served models; fallback_config additionally reroutes
+    # failed calls (429/5xx) to the other served entity.
     traffic = TrafficConfig(routes=[
-        Route(served_entity_name="primary", traffic_percentage=100),
-        Route(served_entity_name="fallback", traffic_percentage=0),
+        Route(served_entity_name="primary", traffic_percentage=PRIMARY_PCT),
+        Route(served_entity_name="fallback", traffic_percentage=FALLBACK_PCT),
     ])
+    print(f"    traffic split: primary={PRIMARY_PCT}%  fallback={FALLBACK_PCT}%")
 
     gateway = dict(
         guardrails=AiGatewayGuardrails(

@@ -44,9 +44,42 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO "${SP}";
 SQL
 
 echo "==> (c) Grant the SP CAN_QUERY on the Unity AI Gateway endpoint '${UAIG_ENDPOINT}'"
-EPID=$(databricks serving-endpoints get "${UAIG_ENDPOINT}" -p "$P" -o json | jq -r '.id')
-databricks serving-endpoints update-permissions "${EPID}" \
-  --json "{\"access_control_list\":[{\"service_principal_name\":\"${SP}\",\"permission_level\":\"CAN_QUERY\"}]}" \
-  -p "$P" -o json | jq -r '.access_control_list[]? | "    \(.service_principal_name // .display_name): \(.all_permissions[0].permission_level)"'
+# Shared Databricks foundation-model system endpoints (e.g. databricks-claude-sonnet-5)
+# have no permissionable `id` — you cannot (and need not) set an ACL on them; the app
+# gets access via the CAN_QUERY app RESOURCE bound in setup/03_deploy_app.sh. Only
+# custom/owned endpoints (e.g. from register_llm_gateway.py) expose an id to grant on.
+EPID=$(databricks serving-endpoints get "${UAIG_ENDPOINT}" -p "$P" -o json | jq -r '.id // empty')
+if [ -z "$EPID" ]; then
+  echo "    '${UAIG_ENDPOINT}' is a system endpoint (no grantable id) — skipping direct ACL."
+  echo "    The app's CAN_QUERY access comes from the app resource binding in step 03."
+else
+  databricks serving-endpoints update-permissions "${EPID}" \
+    --json "{\"access_control_list\":[{\"service_principal_name\":\"${SP}\",\"permission_level\":\"CAN_QUERY\"}]}" \
+    -p "$P" -o json | jq -r '.access_control_list[]? | "    \(.service_principal_name // .display_name): \(.all_permissions[0].permission_level)"'
+fi
+
+if [ -n "${MODEL_SERVICE:-}" ]; then
+  echo "==> (d) Grant the SP access to the Unity AI Gateway MODEL SERVICE '${MODEL_SERVICE}'"
+  # MODEL_SERVICE is a UC securable catalog.schema.name. The SP needs EXECUTE on it,
+  # plus USE SCHEMA and USE CATALOG to resolve the name (UC reports missing traversal
+  # as NOT_FOUND). USE CATALOG may already be covered by the 'account users' group; the
+  # grant is attempted and a failure (no MANAGE on the catalog) is tolerated with a note.
+  MS_CATALOG="${MODEL_SERVICE%%.*}"
+  MS_REST="${MODEL_SERVICE#*.}"
+  MS_SCHEMA="${MS_REST%%.*}"
+  databricks api patch "/api/2.1/unity-catalog/permissions/model_service/${MODEL_SERVICE}" \
+    --json "{\"changes\":[{\"principal\":\"${SP}\",\"add\":[\"EXECUTE\"]}]}" -p "$P" >/dev/null \
+    && echo "    EXECUTE granted on model service"
+  databricks api patch "/api/2.1/unity-catalog/permissions/schema/${MS_CATALOG}.${MS_SCHEMA}" \
+    --json "{\"changes\":[{\"principal\":\"${SP}\",\"add\":[\"USE_SCHEMA\"]}]}" -p "$P" >/dev/null \
+    && echo "    USE_SCHEMA granted on ${MS_CATALOG}.${MS_SCHEMA}"
+  if databricks api patch "/api/2.1/unity-catalog/permissions/catalog/${MS_CATALOG}" \
+       --json "{\"changes\":[{\"principal\":\"${SP}\",\"add\":[\"USE_CATALOG\"]}]}" -p "$P" >/dev/null 2>&1; then
+    echo "    USE_CATALOG granted on ${MS_CATALOG}"
+  else
+    echo "    NOTE: could not grant USE_CATALOG on ${MS_CATALOG} (needs MANAGE). If the SP"
+    echo "          isn't covered by 'account users', a catalog admin must grant USE CATALOG."
+  fi
+fi
 
 echo "==> Done. The app SP can now: mint Lakebase tokens, read/write checkpoints, and call the gateway."

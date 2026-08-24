@@ -139,9 +139,20 @@ MOOD_PROMPT = (
     "message and classify it. Choose a `search_keyword` that is a real Indian "
     "dish or ingredient likely to match a recipe database (e.g. 'curry', "
     "'biryani', 'paneer', 'masala', 'tandoori', 'dal'). "
+    "Set intent to 'greeting' if the message is a greeting, small talk, thanks, or "
+    "anything that is NOT a food/mood/recipe request (e.g. 'hi', 'hello', 'how are "
+    "you', 'thanks'). "
     "Set intent to 'weather_pairing' ONLY if the user names a city/place and the "
     "weather could matter; 'recipe' if they explicitly want a recipe or how-to; "
     "otherwise 'suggest'. Extract a city into `location` if one is mentioned."
+)
+
+GREET_PROMPT = (
+    "You are a warm, upbeat Indian-cuisine concierge. The user sent a greeting or a "
+    "message that isn't a food request. Reply in 1-2 short sentences: greet them "
+    "back, say in one line that you suggest Indian dishes based on their mood, and "
+    "invite them to share their mood/craving (and their city if they'd like "
+    "weather-based picks). Do NOT recommend a specific dish yet. Keep it friendly."
 )
 
 SYNTH_PROMPT = (
@@ -158,7 +169,7 @@ SYNTH_PROMPT = (
 
 
 class MoodAnalysis(BaseModel):
-    intent: Literal["suggest", "recipe", "weather_pairing"] = "suggest"
+    intent: Literal["greeting", "suggest", "recipe", "weather_pairing"] = "suggest"
     flavor_profile: str = Field(default="comforting", description="short flavor mood")
     search_keyword: str = Field(default="curry", description="an Indian dish/ingredient")
     mood_summary: str = Field(default="", description="one short phrase about the mood")
@@ -170,6 +181,26 @@ _HEURISTIC = [
     (("celebrate", "party", "festive", "feast", "happy", "special"), "biryani", "festive"),
     (("light", "healthy", "fresh", "hot", "summer", "diet"), "tandoori", "light and fresh"),
 ]
+
+
+_GREETINGS = {
+    "hi", "hello", "hey", "yo", "hiya", "howdy", "hola", "namaste", "namaskar",
+    "sup", "greetings", "good morning", "good afternoon", "good evening",
+    "how are you", "how are you?", "how's it going", "whats up", "what's up",
+    "thanks", "thank you", "thankyou", "ok", "okay", "cool", "nice",
+}
+
+
+def _is_greeting(text: str) -> bool:
+    """Conservative check: is this just a greeting / small talk (no food request)?
+
+    Keeps the common 'hi' case instant and deterministic — no LLM/tool calls — and
+    acts as a safety net if the LLM classifier is unavailable.
+    """
+    cleaned = text.strip().lower().strip("!.?,")
+    if not cleaned:
+        return True
+    return cleaned in _GREETINGS
 
 
 def _latest_user_text(state: CuisineState) -> str:
@@ -193,6 +224,11 @@ def analyze_mood(state: CuisineState) -> dict:
     keyword heuristic.
     """
     text = _latest_user_text(state)
+
+    # Greeting / non-food small talk -> skip tools and go straight to a friendly
+    # greeting (deterministic, no LLM or recipe lookups needed).
+    if _is_greeting(text):
+        return {"intent": "greeting", "mood_summary": text[:120]}
 
     # Tier 1: structured output.
     try:
@@ -334,13 +370,56 @@ def _deterministic_reply(state: CuisineState) -> str:
             "and I'll suggest an Indian dish as soon as it's back!")
 
 
-def synthesize(state: CuisineState) -> dict:
+_DEFAULT_GREETING = (
+    "Hey there! 👋 I'm your Indian-cuisine concierge — tell me your mood or what "
+    "you're craving (and your city, if you'd like weather-based picks) and I'll find "
+    "the perfect dish for you. 😊"
+)
+
+
+def greet(state: CuisineState) -> dict:
+    """Terminal node for greetings / small talk: greet warmly and invite a craving.
+
+    No dish search or recipe lookup — just a friendly welcome. Falls back to a
+    deterministic greeting if the LLM call fails.
+    """
+    text = _latest_user_text(state)
+    try:
+        reply = build_llm().invoke([("system", GREET_PROMPT), ("human", text)])
+        content = getattr(reply, "content", None) or _DEFAULT_GREETING
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("greet LLM failed, using default greeting: %s", exc)
+        content = _DEFAULT_GREETING
+    return {"messages": [AIMessage(content=content)]}
+
+
+def _memory_scope(config) -> str:
+    """Trusted per-user scope for long-term memory (never model-chosen)."""
+    cfg = config.get("configurable", {}) if isinstance(config, dict) else {}
+    return cfg.get("caller_email") or cfg.get("caller_user") or "anon"
+
+
+def synthesize(state: CuisineState, config=None, store=None) -> dict:
     """Terminal LLM node: compose the final warm recommendation.
 
     Always appends exactly one AIMessage so callers can read
-    output['messages'][-1].content.
+    output['messages'][-1].content. When a long-term memory `store` is wired in
+    (LangGraph injects it by parameter name), it recalls durable facts about the
+    guest to personalize the reply, and remembers their taste for next time. Both
+    are best-effort and gated on `store` — with no store this behaves exactly as
+    before (e.g. the stateless serving endpoint).
     """
     context = _format_context(state)
+
+    scope = _memory_scope(config)
+    if store is not None:
+        from memory import recall  # lazy: only when long-term memory is enabled
+        query = state.get("mood_summary") or _latest_user_text(state)
+        remembered = recall(store, scope, query, limit=3)
+        if remembered:
+            context = ("What we remember about this guest:\n"
+                       + "\n".join(f"- {m}" for m in remembered) + "\n\n" + context)
+
     try:
         reply = build_llm().invoke(
             [("system", SYNTH_PROMPT), ("human", f"Context:\n{context}")]
@@ -349,6 +428,14 @@ def synthesize(state: CuisineState) -> dict:
     except Exception as exc:  # noqa: BLE001
         logger.warning("synthesize LLM failed, using deterministic reply: %s", exc)
         content = _deterministic_reply(state)
+
+    if store is not None:
+        from memory import remember  # lazy
+        flavor, keyword = state.get("flavor_profile"), state.get("search_keyword")
+        if flavor or keyword:
+            remember(store, scope,
+                     f"Enjoys {flavor or 'flavorful'} dishes such as {keyword or 'curry'}.")
+
     return {"messages": [AIMessage(content=content)]}
 
 
@@ -356,6 +443,8 @@ def synthesize(state: CuisineState) -> dict:
 
 
 def route_after_mood(state: CuisineState) -> str:
+    if state.get("intent") == "greeting":
+        return "greet"
     if state.get("intent") == "weather_pairing" and state.get("location"):
         return "pair_weather"
     return "find_dishes"
@@ -368,11 +457,18 @@ def route_after_dishes(state: CuisineState) -> str:
 # --- Graph --------------------------------------------------------------------
 
 
-def build_graph(checkpointer=None):
-    """Create the cuisine-concierge graph, optionally with a checkpointer for
-    durable state. Signature/contract unchanged so both callers keep working."""
+def build_graph(checkpointer=None, store=None):
+    """Create the cuisine-concierge graph.
+
+    Args:
+        checkpointer: SHORT-TERM memory (per-thread conversation state).
+        store: LONG-TERM memory (a LangGraph BaseStore); optional. When present,
+            nodes that declare a `store` parameter receive it, enabling durable
+            cross-thread memories. Both are the standard LangGraph interfaces
+            (see the modular `memory/` package), so callers stay unchanged."""
     g = StateGraph(CuisineState)
     g.add_node("analyze_mood", analyze_mood)
+    g.add_node("greet", greet)
     g.add_node("pair_weather", pair_weather)
     g.add_node("find_dishes", find_dishes)
     g.add_node("get_recipe", get_recipe)
@@ -381,8 +477,9 @@ def build_graph(checkpointer=None):
     g.add_edge(START, "analyze_mood")
     g.add_conditional_edges(
         "analyze_mood", route_after_mood,
-        {"pair_weather": "pair_weather", "find_dishes": "find_dishes"},
+        {"greet": "greet", "pair_weather": "pair_weather", "find_dishes": "find_dishes"},
     )
+    g.add_edge("greet", END)
     g.add_edge("pair_weather", "find_dishes")
     g.add_conditional_edges(
         "find_dishes", route_after_dishes,
@@ -391,4 +488,4 @@ def build_graph(checkpointer=None):
     g.add_edge("get_recipe", "synthesize")
     g.add_edge("synthesize", END)
 
-    return g.compile(checkpointer=checkpointer)
+    return g.compile(checkpointer=checkpointer, store=store)

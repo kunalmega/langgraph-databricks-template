@@ -17,6 +17,8 @@
 #   bash setup/01_provision_lakebase.sh
 # =============================================================================
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
+load_env   # load .env (or $ENV_FILE) so this runs standalone, not only pre-sourced
 
 : "${DATABRICKS_PROFILE:?set DATABRICKS_PROFILE in .env}"
 : "${LAKEBASE_PROJECT:?set LAKEBASE_PROJECT in .env (e.g. langgraph-sample)}"
@@ -56,11 +58,20 @@ else
     -c "CREATE DATABASE ${PGDATABASE};"
 fi
 
-echo "==> [4/4] Done."
+echo "==> [4/5] Write PGHOST + ENDPOINT_NAME back to .env (no manual editing)"
+upsert_env PGHOST "${HOST}"
+upsert_env ENDPOINT_NAME "${ENDPOINT}"
+
+echo "==> [5/5] Create the LangGraph checkpoint tables (so the app never 500s on the first chat)"
+# Mint a fresh DB credential and create the tables as the current user. The app SP
+# is granted access afterwards by setup/02_grant_app_sp.sh.
+PY="${REPO_ROOT}/.venv/bin/python"
+[ -x "$PY" ] || PY="python3"
+PGPASSWORD="$TOKEN" DB_USER="$EMAIL" PGHOST="$HOST" PGDATABASE="$PGDATABASE" \
+  PGPORT="${PGPORT:-5432}" PGSSLMODE="${PGSSLMODE:-require}" \
+  "$PY" "${REPO_ROOT}/setup/_create_checkpoint_tables.py"
+
 echo ""
-echo "    Put these in your .env (and later in app.yaml):"
-echo "      PGHOST=${HOST}"
-echo "      ENDPOINT_NAME=${ENDPOINT}"
-echo ""
-echo "    The LangGraph checkpoint tables are created automatically the first time"
-echo "    the app runs POST /api/setup (see server/routes/chat.py)."
+echo "==> Done. Lakebase provisioned, .env updated, checkpoint tables created."
+echo "    PGHOST=${HOST}"
+echo "    ENDPOINT_NAME=${ENDPOINT}"

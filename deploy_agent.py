@@ -102,7 +102,7 @@ def main() -> None:
             logged = mlflow.pyfunc.log_model(
                 name="agent",
                 python_model="agent.py",
-                code_paths=["server/"],
+                code_paths=["server/", "memory/"],
                 pip_requirements=[
                     "mlflow>=2.20.2",
                     "langgraph==1.2.8",

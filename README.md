@@ -22,7 +22,7 @@ One agent definition (`server/graph.py`) is reused everywhere — change it once
 1. [How it fits together](#1-how-it-fits-together)
 2. [What you edit to reuse it](#2-what-you-edit-to-reuse-it)
 3. [Prerequisites](#3-prerequisites-one-time)
-4. [Build & deploy — the 5 steps](#4-build--deploy--the-5-steps)
+4. [Build & deploy](#4-build--deploy) — [fast path](#the-fast-path--deploy-to-a-workspace-in-two-commands-) or manual
 5. [Swapping the LLM](#5-swapping-the-llm)
 6. [Using the agent (two ways)](#6-using-the-agent-two-ways)
 7. [File map](#7-file-map)
@@ -51,11 +51,15 @@ One agent definition (`server/graph.py`) is reused everywhere — change it once
 
 | To change… | Edit… |
 |---|---|
-| **All config** (workspace, LLM, Lakebase names) | `.env` (copied from `.env.example`) — the one file |
+| **All config** (workspace, LLM, Lakebase names) | `.env` — created for you by `setup/00_init_env.sh`, the one config file |
 | **What the agent does** (tool + prompt) | `server/graph.py` |
 | **Which LLM** | one value: `UAIG_ENDPOINT` (see [§5](#5-swapping-the-llm)) |
 
-Everything else rarely changes. See the [file map](#7-file-map) for the rest.
+You **never hand-edit `app.yaml`** — it's generated from `app.yaml.template` + `.env` by
+`setup/render_app_yaml.sh` (and gitignored, since it holds workspace values). The values
+other steps discover — `PGHOST`, `ENDPOINT_NAME`, and the app service-principal id
+(`PGUSER`) — are written back into `.env` automatically. Everything else rarely changes;
+see the [file map](#7-file-map).
 
 ---
 
@@ -79,27 +83,60 @@ UV_INDEX_URL="https://pypi-proxy.cloud.databricks.com/simple" uv sync
 
 ---
 
-## 4. Build & deploy — the 5 steps
+## 4. Build & deploy
 
-Run them in order. Everything is parameterised from `.env`; `set -a; source .env; set +a`
-before each step.
+### The fast path — deploy to a workspace in two commands 🚀
+
+No manual file edits. `00_init_env.sh` writes your `.env`; `deploy_all.sh` provisions
+Lakebase (and the checkpoint tables), creates the app, discovers + grants its service
+principal, writes every derived value back to `.env`, renders `app.yaml`, and deploys.
+
+```bash
+databricks auth login --profile my-workspace          # once
+
+# 1. Create .env for the target workspace (pass what you know; the rest have defaults)
+DATABRICKS_PROFILE=my-workspace \
+UC_CATALOG=main UC_SCHEMA=default \
+UAIG_ENDPOINT=databricks-claude-sonnet-5 \
+APP_NAME=langgraph-sample \
+bash setup/00_init_env.sh
+
+# 2. Provision + grant + render + deploy — one command, idempotent
+bash setup/deploy_all.sh
+```
+
+`deploy_all.sh` prints the **App URL** at the end. To also register the governed **agent
+endpoint** (Gateway → Agents inventory), run [Step 4](#step-4--register-the-agent-into-unity-ai-gateway-)
+afterwards. To move to another workspace, just re-run `00_init_env.sh` with a different
+`DATABRICKS_PROFILE` and run `deploy_all.sh` again.
+
+> **Deploying an agent that runs OUTSIDE Databricks** (on EKS/AKS/GKE or any HTTP endpoint)?
+> See [`external-agents/`](external-agents/) — it registers that agent onto the same Gateway
+> **Agents** inventory (visibility + governance), independent of this app.
+
+---
+
+### The manual path — the 5 steps, explained
+
+Prefer to run each piece yourself (or understand what `deploy_all.sh` does)? Run these in
+order. Everything is parameterised from `.env`; `set -a; source .env; set +a` before each step.
 
 ### Step 1 — Create Lakebase (the memory store)
 
 ```bash
 bash setup/01_provision_lakebase.sh
 ```
-Creates the Lakebase project + database and **prints `PGHOST` and `ENDPOINT_NAME`** →
-paste both into `.env`, then re-source it (`set -a; source .env; set +a`). Idempotent
-(safe to re-run). *This is the code that creates Lakebase — no manual CLI needed.*
+Creates the Lakebase project + database, **creates the LangGraph checkpoint tables**, and
+**writes `PGHOST` + `ENDPOINT_NAME` back into `.env`** automatically (no manual paste).
+Idempotent (safe to re-run). Re-source `.env` afterwards if you have it loaded in your shell.
+*This is the code that creates Lakebase — no manual CLI needed.*
 
 ### Step 2 — Run & test locally
 
+Step 1 already created the checkpoint tables, so you can run straight away:
+
 ```bash
-# The /api/setup route is gated off by default (it issues DDL). Enable it just for
-# this one-time bootstrap, then leave it off. (Alternatively provision via setup/ scripts.)
-ENABLE_SETUP_ROUTE=true uv run uvicorn app:app --reload --port 8000
-curl -sX POST localhost:8000/api/setup     # once: creates the checkpoint tables
+uv run uvicorn app:app --reload --port 8000
 curl -s localhost:8000/api/ready           # readiness: checks Lakebase + LLM config
 
 # Two turns on the same thread → proves memory persists in Lakebase
@@ -114,25 +151,28 @@ keyed by `thread_id` — not in the app's RAM.
 ### Step 3 — Deploy the app + grant its service principal
 
 A Databricks App runs as its **own service principal (SP)**, created when the app is
-created. So it's a 3-part dance (create → grant → redeploy):
+created. So it's a create → grant → deploy sequence (all three are one command via
+`deploy_all.sh`; here's the manual form):
 
 ```bash
-# 3a. Create the app, sync code, bind the gateway resource. Prints the app SP client id.
+# 3a. Create the app + get its SP. Writes PGUSER=<app SP> into .env automatically.
 bash setup/03_deploy_app.sh
-#     -> copy the printed "APP SP client id"
+#     -> note the printed "APP SP client id"
 
 # 3b. Grant that SP everything it needs:
 #     - a Postgres role on Lakebase (to mint DB tokens)
 #     - table/schema GRANTs in the app DB (to read/write checkpoints)
-#     - CAN_QUERY on the gateway endpoint (so its LLM calls are allowed)
-APP_SP_CLIENT_ID=<paste-from-3a> bash setup/02_grant_app_sp.sh
+#     - CAN_QUERY on the gateway endpoint (skipped for shared system endpoints —
+#       those get access via the app resource binding instead)
+APP_SP_CLIENT_ID=<printed-in-3a> bash setup/02_grant_app_sp.sh
 
-# 3c. Put PGUSER=<that SP client id> in app.yaml, then redeploy to pick it up
+# 3c. Redeploy so the app picks up the grants (app.yaml is re-rendered from .env for you)
 bash setup/03_deploy_app.sh
 ```
 `setup/02_grant_app_sp.sh` is the code that **gives the app SP all its access** — skipping
-it is what causes `invalid_client` (Lakebase) or `403` (gateway). Logs: append `/logz` to
-the app URL (`databricks apps get <app> -p <profile> | jq -r .url`).
+it is what causes `invalid_client` (Lakebase) or `403` (gateway). `PGUSER` and `app.yaml`
+are handled for you — no manual edits. Logs: `databricks apps logs <app> -p <profile>`
+(or append `/logz` to the app URL).
 
 ### Step 3.5 — (Optional) Own a governed LLM endpoint with fallback
 
@@ -238,11 +278,17 @@ Register the agent (Step 4) when you want it inventoried, versioned, and indepen
 | `agent.py` | Same agent wrapped as an MLflow ChatAgent (for the endpoint). |
 | `deploy_agent.py` | Log → register → deploy the agent onto the Gateway Agents page. (Set `MODEL_URI=models:/m-...` to skip re-logging on a retry.) |
 | `register_llm_gateway.py` | (Optional) Create your own governed LLM endpoint: primary + fallback model, guardrails, rate limit, usage. |
-| `app.yaml` | Deployed-app config: env vars the app sees (incl. `UAIG_ENDPOINT`). |
+| `app.yaml.template` | Source for `app.yaml` — `${VAR}` tokens filled from `.env`. Edit this, not `app.yaml`. |
+| `app.yaml` | **Generated** (gitignored) by `setup/render_app_yaml.sh`: the env vars the deployed app sees. |
 | `static/index.html` | No-build chat UI (so npm isn't required). |
-| `setup/01_provision_lakebase.sh` | **Creates Lakebase** (project + database). |
+| `setup/00_init_env.sh` | **Creates `.env`** for a target workspace from the values you pass. |
+| `setup/deploy_all.sh` | **One-command deploy**: provision → create app → grant → render → deploy. |
+| `setup/01_provision_lakebase.sh` | **Creates Lakebase** (project + database + checkpoint tables); writes `PGHOST`/`ENDPOINT_NAME` to `.env`. |
 | `setup/02_grant_app_sp.sh` | Grants the app SP all access (Postgres role, grants, gateway CAN_QUERY). |
-| `setup/03_deploy_app.sh` | Create + sync + deploy the app. |
+| `setup/03_deploy_app.sh` | Render `app.yaml` + sync + deploy the app; writes `PGUSER` to `.env`. |
+| `setup/render_app_yaml.sh` | Render `app.yaml` from `app.yaml.template` + `.env`. |
+| `setup/_lib.sh` / `setup/_create_checkpoint_tables.py` | Shared helpers (env upsert; checkpoint-table creation). |
+| `external-agents/` | Register an agent running OUTSIDE Databricks (EKS/AKS/GKE/HTTP) on the Gateway Agents inventory. |
 | `test_both_ways.py` / `test_api_sp.py` | Test both consumption paths (SDK auth / SP token-only). |
 | `docs/ARCHITECTURE.md` | How it all works, in plain language. |
 | `USAGE.md` / `RUN_TEST.md` | How to call the agent / how to run the tests. |
@@ -256,7 +302,9 @@ Register the agent (Step 4) when you want it inventoried, versioned, and indepen
 | `Connection refused ... pypi.org` | Public PyPI blocked → use `UV_INDEX_URL="https://pypi-proxy.cloud.databricks.com/simple"`. |
 | `Error installing packages` on deploy | Don't ship `uv.lock` (proxy wheel URLs rotate); ship `requirements.txt` with pinned versions. |
 | App 502 / `ImportError: ExecutionInfo` | LangGraph version skew — keep the pinned set in `requirements.txt`. |
+| App 500 + `relation "checkpoints" does not exist` | Checkpoint tables never created. `setup/01` now creates them; if you provisioned before this, re-run `setup/01_provision_lakebase.sh` (idempotent) or `POST /api/setup` with `ENABLE_SETUP_ROUTE=true`. |
 | App 500 + `invalid_client` in `/logz` | App SP lost its access/credential → re-run `setup/02_grant_app_sp.sh`; if the SP secret was wiped, delete+recreate the app. |
+| `'null' is not a valid Inference Endpoint ID` in `setup/02` | `UAIG_ENDPOINT` is a shared foundation-model system endpoint (no grantable id). Handled — step (c) skips the direct ACL; access comes from the app resource binding in `setup/03`. |
 | `403 Forbidden` calling the app | Caller lacks **CAN_USE** on the app. |
 | `403 Forbidden` calling the agent endpoint | Caller lacks **CAN_QUERY** on the serving endpoint. |
 | `cannot get token: multiple profiles match host` | `export DATABRICKS_CONFIG_PROFILE=<profile>` (MLflow auth disambiguation). |
@@ -268,4 +316,5 @@ Register the agent (Step 4) when you want it inventoried, versioned, and indepen
 
 *Template scaffolded for a Databricks serverless workspace. Contains workspace
 identifiers (host, app URL, SP client id) — not secrets. Keep real `.env` files and OAuth
-secrets out of git (`.env` is gitignored).*
+secrets out of git: both `.env` and the generated `app.yaml` are gitignored (edit
+`app.yaml.template`, not `app.yaml`).*

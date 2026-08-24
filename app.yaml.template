@@ -1,0 +1,66 @@
+# Databricks App config — TEMPLATE. Rendered into app.yaml by
+# setup/render_app_yaml.sh, which substitutes ${...} from your .env. Do NOT edit
+# app.yaml by hand — edit .env (or this template) and re-render/redeploy.
+#
+# These are the environment variables the deployed app sees. For LOCAL runs the
+# same values come from .env instead (see .env.example). Nothing here is a secret —
+# secrets are injected via `valueFrom` from a Databricks secret scope.
+command:
+  - "python"
+  - "-m"
+  - "uvicorn"
+  - "app:app"
+  - "--host"
+  - "0.0.0.0"
+  - "--port"
+  - "8000"
+
+env:
+  # --- Lakebase (state store) — discovered by setup/01, written to .env automatically ---
+  - name: ENDPOINT_NAME
+    value: "${ENDPOINT_NAME}"
+  - name: PGHOST
+    value: "${PGHOST}"
+  # PGUSER = the app service-principal client id (written to .env by setup/03).
+  - name: PGUSER
+    value: "${PGUSER}"
+  - name: PGDATABASE
+    value: "${PGDATABASE}"
+  - name: PGPORT
+    value: "${PGPORT}"
+  - name: PGSSLMODE
+    value: "${PGSSLMODE}"
+
+  # --- Unity AI Gateway (the LLM the agent uses) ---
+  # If MODEL_SERVICE is set, server/graph.py routes through the model service
+  # (primary + fallback / traffic split) instead of UAIG_ENDPOINT.
+  - name: UAIG_ENDPOINT
+    value: "${UAIG_ENDPOINT}"
+  - name: MODEL_SERVICE
+    value: "${MODEL_SERVICE}"
+  - name: MODEL_SERVICE_AUTH
+    value: "${MODEL_SERVICE_AUTH}"
+
+  - name: AGENT_NAME
+    value: "${AGENT_NAME}"
+
+  # --- Agent memory (modular memory/ package) ---
+  # Short-term = checkpointer (per-thread, always on via Lakebase). Long-term =
+  # cross-thread store: set MEMORY_LONG_TERM=databricks to enable (uses Lakebase +
+  # optional semantic search via MEMORY_EMBEDDING_ENDPOINT). "none" disables it.
+  - name: MEMORY_SHORT_TERM
+    value: "${MEMORY_SHORT_TERM}"
+  - name: MEMORY_LONG_TERM
+    value: "${MEMORY_LONG_TERM}"
+  - name: LAKEBASE_PROJECT
+    value: "${LAKEBASE_PROJECT}"
+  - name: LAKEBASE_BRANCH
+    value: "${LAKEBASE_BRANCH}"
+  - name: MEMORY_EMBEDDING_ENDPOINT
+    value: "${MEMORY_EMBEDDING_ENDPOINT}"
+
+  # --- Operational toggles (safe defaults) ---
+  - name: REQUIRE_CALLER_IDENTITY
+    value: "${REQUIRE_CALLER_IDENTITY}"
+  - name: ENABLE_SETUP_ROUTE
+    value: "${ENABLE_SETUP_ROUTE}"

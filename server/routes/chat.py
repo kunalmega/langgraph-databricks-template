@@ -18,11 +18,12 @@ from dataclasses import dataclass
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
-from langgraph.checkpoint.postgres import PostgresSaver
 from pydantic import BaseModel
 
+from memory import build_checkpointer
 from ..db import get_pool
 from ..graph import build_graph
+from ..memory_wire import get_store
 from ..settings import get_settings
 
 router = APIRouter()
@@ -79,11 +80,12 @@ def chat(req: ChatRequest, caller: CallerContext = Depends(get_caller)) -> ChatR
     owner = caller.email or caller.user or "anon"
     thread_id = req.thread_id or str(uuid.uuid4())
 
-    # PostgresSaver stores checkpoints in the Lakebase database. It borrows a
-    # connection from the shared OAuth pool for the duration of the call.
+    # SHORT-TERM memory: a checkpointer stores this thread's state in Lakebase.
+    # It borrows a connection from the shared OAuth pool for the call. LONG-TERM
+    # memory (get_store()) is passed too — None (no-op) unless configured.
     with get_pool().connection() as conn:
-        checkpointer = PostgresSaver(conn)
-        graph = build_graph(checkpointer=checkpointer)
+        checkpointer = build_checkpointer(conn)
+        graph = build_graph(checkpointer=checkpointer, store=get_store())
         result = graph.invoke(
             {"messages": [{"role": "user", "content": req.message}]},
             config={

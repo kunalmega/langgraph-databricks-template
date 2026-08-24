@@ -5,6 +5,11 @@ __pycache__/
 venv/
 .env
 
+# Per-workspace env files (keep the example). Also keeps `databricks sync` from
+# uploading them to the workspace, since sync respects .gitignore.
+.env.*
+!.env.example
+
 # Node
 node_modules/
 npm-debug.log*

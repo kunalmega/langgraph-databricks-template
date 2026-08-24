@@ -26,9 +26,13 @@ async def lifespan(app: FastAPI):
     pool = create_pool(open=False)
     set_pool(pool)
     pool.open(wait=True, timeout=30.0)  # fail fast if Lakebase is unreachable
+    # Long-term memory store (no-op unless MEMORY_LONG_TERM is configured).
+    from server.memory_wire import init_long_term_memory, set_store
+    init_long_term_memory()
     try:
         yield
     finally:
+        set_store(None)
         pool.close()
         set_pool(None)
 
