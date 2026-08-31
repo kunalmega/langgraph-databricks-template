@@ -22,6 +22,8 @@ build_llm()); the dish/recipe/weather tools are plain HTTP (server/tools/).
 import json
 import logging
 import os
+import random
+import re
 from typing import Literal, Optional
 
 import mlflow
@@ -142,6 +144,9 @@ MOOD_PROMPT = (
     "Set intent to 'greeting' if the message is a greeting, small talk, thanks, or "
     "anything that is NOT a food/mood/recipe request (e.g. 'hi', 'hello', 'how are "
     "you', 'thanks'). "
+    "Set intent to 'snack' if they ask for a snack, tea-time, or an evening "
+    "nibble (e.g. 'evening snack', 'pakoda', 'something with chai/coffee'); use "
+    "search_keyword 'pakora' for that. "
     "Set intent to 'weather_pairing' ONLY if the user names a city/place and the "
     "weather could matter; 'recipe' if they explicitly want a recipe or how-to; "
     "otherwise 'suggest'. Extract a city into `location` if one is mentioned."
@@ -164,12 +169,23 @@ SYNTH_PROMPT = (
     "concise. If information is missing, be graceful and still helpful."
 )
 
+# Evening snack / tea-time pairing (the classic Indian rainy-evening combo).
+SNACK_SYNTH_PROMPT = (
+    "You are a warm Indian-cuisine concierge and it's a cozy evening. Recommend the "
+    "classic Indian evening snack pairing: hot, crispy pakoras (use the provided "
+    "dish as the snack if one is present, otherwise onion/potato pakora) with a hot "
+    "drink. Offer BOTH options for the drink: masala chai, and South Indian filter "
+    "coffee, and let them pick. Include: the snack name, 3-5 key snack ingredients, "
+    "a one-line method, a quick masala-chai note (tea, milk, ginger, cardamom, "
+    "sugar), the YouTube link if present. Keep it cozy and concise."
+)
+
 
 # --- Structured output schema for mood analysis -------------------------------
 
 
 class MoodAnalysis(BaseModel):
-    intent: Literal["greeting", "suggest", "recipe", "weather_pairing"] = "suggest"
+    intent: Literal["greeting", "snack", "suggest", "recipe", "weather_pairing"] = "suggest"
     flavor_profile: str = Field(default="comforting", description="short flavor mood")
     search_keyword: str = Field(default="curry", description="an Indian dish/ingredient")
     mood_summary: str = Field(default="", description="one short phrase about the mood")
@@ -189,6 +205,19 @@ _GREETINGS = {
     "how are you", "how are you?", "how's it going", "whats up", "what's up",
     "thanks", "thank you", "thankyou", "ok", "okay", "cool", "nice",
 }
+
+
+_SNACK_TRIGGERS = (
+    "snack", "snacks", "pakoda", "pakora", "pakode", "bhaji", "bhajji", "fritter",
+    "tea time", "tea-time", "teatime", "chai", "with tea", "with coffee",
+    "evening", "munch", "nibble", "namkeen",
+)
+
+
+def _is_snack_request(text: str) -> bool:
+    """Detect an evening-snack / tea-time ask, so we pair chai/coffee + pakoda."""
+    low = text.lower()
+    return any(t in low for t in _SNACK_TRIGGERS)
 
 
 def _is_greeting(text: str) -> bool:
@@ -229,6 +258,17 @@ def analyze_mood(state: CuisineState) -> dict:
     # greeting (deterministic, no LLM or recipe lookups needed).
     if _is_greeting(text):
         return {"intent": "greeting", "mood_summary": text[:120]}
+
+    # Evening snack / tea-time -> deterministic snack path (chai/coffee + pakoda),
+    # so an explicit snack ask is never swallowed by the mood heuristic.
+    if _is_snack_request(text):
+        return {
+            "intent": "snack",
+            "flavor_profile": "crispy tea-time",
+            "search_keyword": "pakora",
+            "mood_summary": text[:120],
+            "location": None,
+        }
 
     # Tier 1: structured output.
     try:
@@ -295,20 +335,29 @@ def pair_weather(state: CuisineState) -> dict:
 
 
 _FALLBACK_KEYWORDS = ["curry", "masala", "biryani", "paneer", "chicken"]
+# TheMealDB has "Onion Bhaji" (a pakora), so snack searches land on a real recipe.
+_SNACK_FALLBACK_KEYWORDS = ["pakora", "bhaji", "onion", "samosa", "potato"]
 
 
 def find_dishes(state: CuisineState) -> dict:
-    """HTTP node: search Indian dishes; retry across common keywords if empty."""
+    """HTTP node: search Indian dishes; retry across common keywords if empty.
+
+    Picks a dish at RANDOM from the matches instead of always the first one, so
+    asking the same thing twice doesn't return the identical dish.
+    """
     keyword = state.get("search_keyword") or "curry"
+    fallbacks = _SNACK_FALLBACK_KEYWORDS if state.get("intent") == "snack" else _FALLBACK_KEYWORDS
     candidates = search_meals(keyword)
     if not candidates:
-        for kw in _FALLBACK_KEYWORDS:
+        for kw in fallbacks:
             candidates = search_meals(kw)
             if candidates:
                 break
     if not candidates:
         return {"candidates": [], "errors": (state.get("errors") or []) + ["no dishes found"]}
-    return {"candidates": candidates, "chosen_id": candidates[0]["id"]}
+    # Vary the pick across the top matches (not always candidates[0]).
+    chosen = random.choice(candidates[:8])
+    return {"candidates": candidates, "chosen_id": chosen["id"]}
 
 
 def get_recipe(state: CuisineState) -> dict:
@@ -353,8 +402,42 @@ def _format_context(state: CuisineState) -> str:
     return "\n".join(parts)
 
 
+def _as_text(content) -> Optional[str]:
+    """Normalize an LLM reply to a plain string.
+
+    Reasoning-capable models can return `content` as a list of blocks
+    (e.g. [{"type":"reasoning",...}, {"type":"text","text":"..."}]) instead of a
+    string. Flatten those to the text so callers always get a str (the chat API
+    and the serving endpoint both expect string content)."""
+    if content is None or isinstance(content, str):
+        return content or None
+    if isinstance(content, list):
+        parts = []
+        for b in content:
+            if isinstance(b, str):
+                parts.append(b)
+            elif isinstance(b, dict) and b.get("type") in (None, "text"):
+                parts.append(b.get("text") or b.get("content") or "")
+        return "".join(parts).strip() or None
+    return str(content)
+
+
+def _deterministic_snack_reply(state: CuisineState) -> str:
+    """Fallback for the snack/tea-time path if the LLM call fails."""
+    recipe = state.get("recipe")
+    snack = recipe["name"] if recipe else "hot onion pakoras"
+    msg = (f"For a cozy evening, go with **{snack}** and a hot drink — either a "
+           "cup of **masala chai** (tea, milk, ginger, cardamom, sugar) or a "
+           "**South Indian filter coffee**. ")
+    if recipe and recipe.get("youtube"):
+        msg += f"Pakora recipe: {recipe['youtube']}"
+    return msg.strip()
+
+
 def _deterministic_reply(state: CuisineState) -> str:
     """Fallback reply if the LLM synth call fails — still useful."""
+    if state.get("intent") == "snack":
+        return _deterministic_snack_reply(state)
     recipe = state.get("recipe")
     if recipe:
         ings = ", ".join(item for item, _ in recipe["ingredients"][:5])
@@ -386,7 +469,7 @@ def greet(state: CuisineState) -> dict:
     text = _latest_user_text(state)
     try:
         reply = build_llm().invoke([("system", GREET_PROMPT), ("human", text)])
-        content = getattr(reply, "content", None) or _DEFAULT_GREETING
+        content = _as_text(getattr(reply, "content", None)) or _DEFAULT_GREETING
     except Exception as exc:  # noqa: BLE001
         logger.warning("greet LLM failed, using default greeting: %s", exc)
         content = _DEFAULT_GREETING
@@ -420,21 +503,24 @@ def synthesize(state: CuisineState, config=None, store=None) -> dict:
             context = ("What we remember about this guest:\n"
                        + "\n".join(f"- {m}" for m in remembered) + "\n\n" + context)
 
+    prompt = SNACK_SYNTH_PROMPT if state.get("intent") == "snack" else SYNTH_PROMPT
     try:
         reply = build_llm().invoke(
-            [("system", SYNTH_PROMPT), ("human", f"Context:\n{context}")]
+            [("system", prompt), ("human", f"Context:\n{context}")]
         )
-        content = getattr(reply, "content", None) or _deterministic_reply(state)
+        content = _as_text(getattr(reply, "content", None)) or _deterministic_reply(state)
     except Exception as exc:  # noqa: BLE001
         logger.warning("synthesize LLM failed, using deterministic reply: %s", exc)
         content = _deterministic_reply(state)
 
+    # Remember only what the GUEST explicitly states ("I love/like/prefer ..."),
+    # not a derived label. Auto-saving "enjoys curry" every turn creates a feedback
+    # loop that biases every future answer toward the same dish.
     if store is not None:
         from memory import remember  # lazy
-        flavor, keyword = state.get("flavor_profile"), state.get("search_keyword")
-        if flavor or keyword:
-            remember(store, scope,
-                     f"Enjoys {flavor or 'flavorful'} dishes such as {keyword or 'curry'}.")
+        text = _latest_user_text(state)
+        if re.search(r"\b(i (love|like|prefer|enjoy)|my favou?rite|allergic)\b", text.lower()):
+            remember(store, scope, f"Guest said: {text[:160]}")
 
     return {"messages": [AIMessage(content=content)]}
 

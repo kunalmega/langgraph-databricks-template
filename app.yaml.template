@@ -59,6 +59,14 @@ env:
   - name: MEMORY_EMBEDDING_ENDPOINT
     value: "${MEMORY_EMBEDDING_ENDPOINT}"
 
+  # --- MLflow tracing (off unless MLFLOW_TRACING=on) ---
+  - name: MLFLOW_TRACING
+    value: "${MLFLOW_TRACING}"
+  - name: MLFLOW_EXPERIMENT_ID
+    value: "${MLFLOW_EXPERIMENT_ID}"
+  - name: MLFLOW_TRACING_SQL_WAREHOUSE_ID
+    value: "${MLFLOW_TRACING_SQL_WAREHOUSE_ID}"
+
   # --- Operational toggles (safe defaults) ---
   - name: REQUIRE_CALLER_IDENTITY
     value: "${REQUIRE_CALLER_IDENTITY}"

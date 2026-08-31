@@ -29,6 +29,9 @@ async def lifespan(app: FastAPI):
     # Long-term memory store (no-op unless MEMORY_LONG_TERM is configured).
     from server.memory_wire import init_long_term_memory, set_store
     init_long_term_memory()
+    # MLflow tracing (no-op unless MLFLOW_TRACING=on) -> traces to an experiment / UC.
+    from server.tracing import init_tracing
+    init_tracing()
     try:
         yield
     finally:
